@@ -313,18 +313,52 @@ which the docstring never states. Measured: `rotation=2*pi` differs from
 a no-op only in radians. The work here is to document the existing behaviour,
 not to change it.
 
-**A tripwire worth considering.** Unlike the coordinate flip, this one has a
-usable heuristic. Radian rotations are almost always within a few multiples of
-`2 * pi`, while a stale degrees call is typically 15, 30, 45, 90 or 180. A
-warning on `abs(angle) > 2 * pi` — "angle is in radians; did you mean
-`np.deg2rad(30)`?" — would catch nearly every unported call. It is a heuristic
-and would occasionally fire on a legitimate large rotation, so it should be a
-warning and never an error. Decide whether to ship it.
+**A tripwire, measured.** Unlike the coordinate flip, this change has a
+usable heuristic: warn when the angle is too large to be plausible in radians.
+It is worth stating exactly what that buys, because it is not a safety net.
 
-The same test is far more reliable for the `radon` family, because `theta`
-there is an array spanning most of a half turn. Any stale call passes values up
-to 180 where the new maximum is `pi`, so a check on `max(abs(theta)) > 2 * pi`
-catches essentially every unported call with no realistic false positive.
+For `rotate`, the test is `abs(angle) > 2 * pi`, so it catches every stale
+value above 6.283 degrees — which covers 15, 30, 45, 90, 180 and the rest of
+the values people actually type. It cannot catch anything at or below 6.283
+degrees.
+
+Whether an uncaught call is *visibly* wrong varies, and not in a helpful way. A
+stale value `d` is read as `d` radians, giving an effective rotation of
+`d mod 2*pi`:
+
+| Meant (deg) | Read as (deg) | Error | Caught |
+| --- | --- | --- | --- |
+| 1 | 57.3 | 56 | no |
+| 5 | 286.5 | 79 | no |
+| 6.28 | 360.0 | **6** | no |
+| 45 | 58.3 | **13** | yes |
+| 90 | 116.6 | 27 | yes |
+| 180 | 233.2 | 53 | yes |
+
+So the subtlest errors of all — 13 degrees at `d = 45`, 27 at `d = 90` — are
+caught, which is the useful half. But the band is not cleanly complementary:
+near `d = 6.28` the error wraps back to 6 degrees, uncaught *and* subtle. The
+smallest error among uncaught values at or above 1 degree is 6 degrees.
+
+**The catch rate cannot be measured from source.** A survey of 111 `rotate`
+calls in public code found only 9% pass a numeric literal; 61% pass a variable,
+27% an expression and 3% a random draw. The runtime distribution of angles is
+not visible in the code, so any claim about what fraction of real calls the
+warning would catch is unfounded. Treat the heuristic as covering the common
+typed values, not as a measured proportion.
+
+One incidental finding from that survey: `angle / np.pi * 180` appears
+repeatedly, users converting radians to degrees in order to call `rotate`. For
+them the change deletes a conversion.
+
+For the `radon` family the same test is much stronger. `theta` is an array
+spanning most of a half turn, so a stale call passes values up to 180 where the
+new maximum is `pi`; and a radian `theta` never exceeds `pi`, so the warning
+cannot fire on a correct call at all. Being uncaught would need an angular span
+below 6.3 degrees, which is not how tomography is done. **No false positives
+are possible, and the uncaught band is empty in practice.**
+
+In both cases this is a warning and never an error.
 
 **The `radon` family converts too.** `radon`, `iradon`, `iradon_sart` and
 `order_angles_golden_ratio` all take `theta` in degrees today, and all move to
