@@ -23,6 +23,8 @@ first array axis, which runs *down* the picture, and the second indexes the
 second axis, which runs *right*. Nothing here uses `x` and `y`.
 
 ```{code-cell} ipython3
+import itertools
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Patch
@@ -151,26 +153,225 @@ every disagreement in this document.
 ## 2. `line`: integer Bresenham
 
 `skimage.draw.line` is classic Bresenham, implemented in Cython
-(`draw/_draw.pyx::_line`) with integer arithmetic only.
+(`draw/_draw.pyx::_line`). It uses integer arithmetic only: no floats, no
+division, and no rounding function anywhere.
 
-It takes the axis with the larger absolute delta as the **driving axis**,
-swapping the roles of the two axes when the line is steep, and steps one pixel
-along that axis per iteration. An integer error term decides when the minor
-axis steps as well:
++++
+
+### The terms
+
+Five quantities do all the work.
+
+- **`delta`** — how far there is to travel on each axis, `abs(stop - start)`.
+- **`step`** — which way to travel on each axis, `+1` or `-1`.
+- **major axis** — the axis with the larger `delta`. The line advances one
+  pixel along it on every iteration without exception, which is why the output
+  holds exactly `delta[major] + 1` pixels.
+- **minor axis** — the other one. It advances on some iterations and not
+  others. Choosing which is the whole of the algorithm.
+- **`error`** — an integer carrying how far the true line has drifted from the
+  minor coordinate currently being drawn. Its sign is the decision.
+
+The Cython source calls the axes `r` and `c`, and physically swaps them when
+the line is steep so that the driving axis is always `c`. Indexing the axes
+rather than swapping them says the same thing with less bookkeeping.
+
++++
+
+### The algorithm
+
+```{code-cell} ipython3
+def bresenham(start, stop):
+    """Bresenham's line, in the same steps as `skimage.draw.line`."""
+    start, stop = np.array(start), np.array(stop)
+    delta = np.abs(stop - start)
+    step = np.sign(stop - start)
+
+    major = int(np.argmax(delta))    # the axis with further to travel
+    minor = 1 - major
+
+    # Positive when the true line has passed the midpoint between the current
+    # minor pixel and the next one. Scaled by 2 * delta[major] to stay integer.
+    error = 2 * delta[minor] - delta[major]
+
+    at = start.copy()
+    pixels = []
+    for _ in range(delta[major]):
+        pixels.append(tuple(at))
+        if error >= 0:
+            at[minor] += step[minor]
+            error -= 2 * delta[major]
+        at[major] += step[major]
+        error += 2 * delta[minor]
+
+    pixels.append(tuple(stop))       # the endpoint is written, never computed
+    return pixels
+```
+
+The last line matters: the endpoint is assigned rather than arrived at, so both
+ends are always present whatever the arithmetic did on the way.
+
++++
+
+### It is the same algorithm
+
+Prose about a reimplementation is worth little. Check it against the real
+function, over every integer endpoint pair in a 15 by 15 box, comparing the
+pixel *sequence* and not merely the set.
+
+```{code-cell} ipython3
+R = range(-7, 8)
+all_pairs = [((a, b), (c, d)) for a, b, c, d in itertools.product(R, repeat=4)]
+
+
+def sk_sequence(p, q):
+    ii, jj = line(p[0], p[1], q[0], q[1])
+    return list(zip(ii.tolist(), jj.tolist()))
+
+
+matches = sum(bresenham(p, q) == sk_sequence(p, q) for p, q in all_pairs)
+print(f"identical to skimage.draw.line on {matches}/{len(all_pairs)} pairs"
+      f"  ({matches / len(all_pairs):.1%})")
+```
+
++++
+
+### What `error` measures
+
+Two counters appear in the explanation. Both count **whole pixel steps already
+taken**, one per axis, measured from the start pixel:
+
+- `k` — steps already taken along the **major** axis. The loop takes exactly
+  one of these per iteration, so `k` is also the iteration number and the
+  number of pixels already emitted.
+- `taken` — steps already taken along the **minor** axis: an integer count of
+  rows, or of columns, whichever axis the minor one happens to be. It is a
+  count of pixels, not a distance and not a fraction.
+
+Here they are, alongside the error, for a single line:
+
+```{code-cell} ipython3
+def trace(start, stop):
+    """The two counters and the error, at each decision."""
+    start, stop = np.array(start), np.array(stop)
+    delta = np.abs(stop - start)
+    major = int(np.argmax(delta))
+    minor = 1 - major
+    d_major, d_minor = int(delta[major]), int(delta[minor])
+
+    error, taken, rows = 2 * d_minor - d_major, 0, []
+    for k in range(d_major):
+        rows.append((k, taken, error))
+        if error >= 0:
+            error -= 2 * d_major
+            taken += 1
+        error += 2 * d_minor
+    return rows
+
+
+print(f"{'k: major steps done':>21}{'taken: minor steps done':>26}{'error':>8}")
+for k, taken, err in trace((0, 0), (2, 7)):
+    print(f"{k:>21}{taken:>26}{err:>8}")
+```
+
+`taken` only ever rises by one, and only on the iterations where `error` was
+not negative.
+
+Both counters are positive whichever way the line runs. The error arithmetic
+uses `delta` alone, which holds absolute distances, and direction enters only
+through `step`. So the decision sequence is identical in every octant, under
+transposition, and under translation, which means the derivation below can be
+read as though the line ran down and to the right.
+
+```{code-cell} ipython3
+base = trace((0, 0), (2, 7))
+elsewhere = {
+    "up and left, (-2, -7)": ((0, 0), (-2, -7)),
+    "down and left, (2, -7)": ((0, 0), (2, -7)),
+    "transposed, (7, 2)": ((0, 0), (7, 2)),
+    "translated by (5, 5)": ((5, 5), (7, 12)),
+}
+for name, (start, stop) in elsewhere.items():
+    print(f"{name:<24} same sequence as (2, 7): {trace(start, stop) == base}")
+```
+
+The test asks whether the minor axis should step *during this iteration* —
+that is, by the time the major axis has reached `k + 1`. At that point the true
+line lies `(k + 1) * delta[minor] / delta[major]` pixels from the start along
+the minor axis. The two candidates for the minor coordinate are `taken` and
+`taken + 1`, so what decides between them is the midpoint, `taken + 0.5`.
+
+`error` is exactly that overshoot, multiplied by `2 * delta[major]`:
 
 ```
-d = 2 * dr - dc                # dr is the minor delta, dc the driving delta
-for each step along the driving axis:
-    emit the current pixel
-    while d >= 0:              # dr <= dc, so this runs at most once
-        minor += sign
-        d -= 2 * dc
-    driving += sign
-    d += 2 * dr
+error == 2 * delta[major] * ((k + 1) * delta[minor] / delta[major] - (taken + 0.5))
 ```
 
-The final point is written as the literal endpoint, so both ends are always
-present and the output holds exactly `max(abs(delta)) + 1` pixels.
+The multiplier is the trick that removes the division. Scaling by a positive
+constant cannot change a sign, so the integer `error` decides the same
+question the fraction would have, and `error >= 0` means the line has passed
+the midpoint and the minor axis must step.
+
+That is a claim about every iteration of every line, so test it as one.
+
+```{code-cell} ipython3
+def error_matches_overshoot(start, stop):
+    """Is `error` the scaled midpoint overshoot at every decision?"""
+    start, stop = np.array(start), np.array(stop)
+    delta = np.abs(stop - start)
+    step = np.sign(stop - start)
+    major = int(np.argmax(delta))
+    minor = 1 - major
+    d_major, d_minor = int(delta[major]), int(delta[minor])
+
+    error, taken = 2 * d_minor - d_major, 0
+    for k in range(d_major):
+        overshoot = (k + 1) * d_minor / d_major - (taken + 0.5)
+        if abs(error - 2 * d_major * overshoot) > 1e-9:
+            return False
+        if error >= 0:
+            error -= 2 * d_major
+            taken += 1
+        error += 2 * d_minor
+    return True
+
+
+agree = sum(error_matches_overshoot(p, q) for p, q in all_pairs)
+print(f"error equals the scaled overshoot on {agree}/{len(all_pairs)} pairs")
+```
+
++++
+
+### Why one minor step is always enough
+
+The Cython source writes the decision as `while d >= 0`, not `if`. The two are
+the same here: the minor axis never has further to travel than the major one,
+so it can never need two steps in one iteration. Since that is what licenses
+the `if` above, check it rather than assume it.
+
+```{code-cell} ipython3
+def never_steps_twice(start, stop):
+    """Would a second pass of the `while` body ever be taken?"""
+    start, stop = np.array(start), np.array(stop)
+    delta = np.abs(stop - start)
+    d_major, d_minor = int(delta.max()), int(delta.min())
+    error = 2 * d_minor - d_major
+    for _ in range(d_major):
+        if error >= 0:
+            error -= 2 * d_major
+            if error >= 0:
+                return False
+        error += 2 * d_minor
+    return True
+
+
+single = sum(never_steps_twice(p, q) for p, q in all_pairs)
+print(f"one minor step per major step suffices on {single}/{len(all_pairs)} pairs")
+```
+
++++
+
+And the line it draws:
 
 ```{code-cell} ipython3
 fig, ax = plt.subplots(figsize=(3.6, 2.0))
@@ -294,8 +495,6 @@ puts a sample exactly on a half. Over **every** integer endpoint pair in a
 13x13 box, not just those from one corner:
 
 ```{code-cell} ipython3
-import itertools
-
 # Every ordered pair of endpoints in a 9x9 box, kept clear of the canvas edge
 # so that Pillow and OpenCV have room to draw in section 7.
 LO, HI = 4, 13
@@ -480,20 +679,270 @@ case — it is the same rasteriser with the endpoint order normalised first.
 More importantly, **OpenCV holds both symmetries at once**. So the trade-off
 our two functions appear to make is not forced. Neither is at a local optimum.
 
-OpenCV also offers a 4-connected line, which we do not have at all:
+OpenCV also offers a second rasteriser, chosen with `lineType`. It is a
+different thing from the tie-breaking above, and it is the subject of the next
+section.
+
+## 8. The two connectivities
+
+`lineType` selects between two rasterisers, `cv2.LINE_8` and `cv2.LINE_4`.
+They are not two settings of one algorithm. They draw different pixel sets,
+with different guarantees, for different jobs.
 
 ```{code-cell} ipython3
-fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.4))
+import scipy.ndimage as ndi
+
+# Slot 3 of the reference categorical palette; validates all-pairs with the
+# blue and orange already in use.
+C_FOUR = "#1baf7a"
+
+S4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]])
+S8 = np.ones((3, 3), int)
+```
+
++++
+
+### What each one guarantees
+
+An 8-connected line may step diagonally, so it needs one pixel per step of the
+longer axis. A 4-connected line may not, so it needs one pixel per step of
+*both* axes. That gives two exact formulas: a Chebyshev length and a Manhattan
+length, each plus one for the starting pixel.
+
+```{code-cell} ipython3
+c8 = c4 = 0
+for a, b in box:
+    di, dj = abs(a[0] - b[0]), abs(a[1] - b[1])
+    c8 += len(cv_line(a, b, 8)) == max(di, dj) + 1
+    c4 += len(cv_line(a, b, 4)) == di + dj + 1
+print(f"over {len(box)} endpoint pairs")
+print(f"   8-connected count == max(|di|, |dj|) + 1 : {c8 / len(box):.1%}")
+print(f"   4-connected count == |di| + |dj| + 1     : {c4 / len(box):.1%}")
+```
+
+Both hold exactly, so `lineType` fixes how many pixels you get before any
+rounding decision is taken.
+
+```{code-cell} ipython3
 a, b = (4, 4), (7, 13)
-for ax, conn, name in ((axes[0], 8, "8-connected"), (axes[1], 4, "4-connected")):
-    pixel_axes(ax, (5, 12), f"opencv, {name}")
-    fill(ax, {(i - 3, j - 3) for i, j in cv_line(a, b, conn)}, C_BOTH)
+fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.4))
+for ax, conn, color, name in (
+    (axes[0], 8, C_BOTH, "LINE_8, 8-connected"),
+    (axes[1], 4, C_FOUR, "LINE_4, 4-connected"),
+):
+    pixel_axes(ax, (5, 12), f"{name}  ({len(cv_line(a, b, conn))} pixels)")
+    fill(ax, {(i - 3, j - 3) for i, j in cv_line(a, b, conn)}, color)
     exact(ax, (a[0] - 3, a[1] - 3), (b[0] - 3, b[1] - 3), color="white")
-fig.suptitle("a connectivity option scikit-image does not offer", y=1.04)
+fig.suptitle("the same segment, drawn twice", y=1.04)
 fig.tight_layout()
 ```
 
-## 8. Two ways forward
+The difference is visible in the moves themselves. Walk each pixel set along
+the driving axis and look at the step taken between consecutive pixels:
+
+```{code-cell} ipython3
+for conn in (8, 4):
+    pix = sorted(cv_line(a, b, conn), key=lambda ij: ij[1])
+    steps = sorted({(abs(p[0] - q[0]), abs(p[1] - q[1]))
+                    for p, q in zip(pix, pix[1:])})
+    print(f"LINE_{conn}: {len(pix):>3} pixels, steps {steps}")
+```
+
+`(1, 1)` is a diagonal move. Only the 8-connected line makes one; the
+4-connected line replaces each with a `(1, 0)` and a `(0, 1)`, which is where
+its extra pixels come from.
+
++++
+
+### The pixel sets have different connectivity
+
+The names describe a property of the drawn set, which is worth checking rather
+than assuming. Label each line as a binary image, once with a 4-connected
+structuring element and once with an 8-connected one. A line that is
+"4-connected" should be a single component under the 4-connected element.
+
+```{code-cell} ipython3
+def as_mask(pixels, shape=(CANVAS, CANVAS)):
+    """The pixel set as a boolean image."""
+    m = np.zeros(shape, bool)
+    for i, j in pixels:
+        m[i, j] = True
+    return m
+
+
+print(f"{'':10}{'one component under S4':>26}{'under S8':>12}")
+for conn in (8, 4):
+    n4 = sum(ndi.label(as_mask(cv_line(a, b, conn)), structure=S4)[1] == 1
+             for a, b in box)
+    n8 = sum(ndi.label(as_mask(cv_line(a, b, conn)), structure=S8)[1] == 1
+             for a, b in box)
+    print(f"LINE_{conn:<5}{n4 / len(box):>25.1%}{n8 / len(box):>12.1%}")
+
+axis_aligned = sum(a[0] == b[0] or a[1] == b[1] for a, b in box)
+print(f"\npairs with no diagonal step at all: {axis_aligned / len(box):>10.1%}")
+```
+
+An 8-connected line falls into separate pieces under 4-connectivity. The
+exceptions are exactly the axis-aligned segments, which take no diagonal step
+and so are 4-connected by accident — the two rates above agree to the digit. A
+4-connected line holds together under both. That is the whole difference,
+stated as a property rather than as a name.
+
++++
+
+### They are not nested
+
+It is tempting to think the 4-connected line is the 8-connected one with corner
+pixels added. It is not.
+
+```{code-cell} ipython3
+nested = sum(cv_line(a, b, 8) <= cv_line(a, b, 4) for a, b in box)
+print(f"8-connected set contained in the 4-connected set: {nested / len(box):.1%}")
+
+example = next((a, b) for a, b in box if not cv_line(a, b, 8) <= cv_line(a, b, 4))
+s8, s4 = cv_line(*example, 8), cv_line(*example, 4)
+print(f"\nfirst counter-example: {example[0]} to {example[1]}")
+print(f"   only in LINE_8: {sorted(s8 - s4)}")
+print(f"   only in LINE_4: {sorted(s4 - s8)}")
+```
+
+```{code-cell} ipython3
+a, b = example
+lo = (min(a[0], b[0]) - 1, min(a[1], b[1]) - 1)
+span = (abs(a[0] - b[0]) + 3, abs(a[1] - b[1]) + 3)
+fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.2))
+for ax, pix, color, name in (
+    (axes[0], s8, C_BOTH, "LINE_8"), (axes[1], s4, C_FOUR, "LINE_4")
+):
+    pixel_axes(ax, span, name)
+    fill(ax, {(i - lo[0], j - lo[1]) for i, j in pix}, color)
+    exact(ax, (a[0] - lo[0], a[1] - lo[1]), (b[0] - lo[0], b[1] - lo[1]),
+          color="white")
+fig.suptitle("neither set contains the other", y=1.06)
+fig.tight_layout()
+```
+
+The two are independent rasterisations of the same segment, and neither is
+derived from the other. Each resolves awkward cases its own way. Which cases,
+and by what rule, is not something this notebook settles.
+
++++
+
+### Why a 4-connected line exists: it seals
+
+The reason to pay for the extra pixels is that a 4-connected curve is a barrier
+an 8-connected flood fill cannot cross. An 8-connected curve is not: a fill that
+may move diagonally slips between two diagonally adjacent pixels.
+
+```{code-cell} ipython3
+def barrier(conn, shape=(28, 40), a=(2, 0), b=(25, 39)):
+    """Draw a line across the array, then label what it leaves free."""
+    arr = np.zeros(shape, np.uint8)
+    cv2.line(arr, (a[1], a[0]), (b[1], b[0]), 255, 1, lineType=conn)
+    labels, n = ndi.label(~(arr > 0), structure=S8)
+    return arr > 0, labels, n
+
+
+for conn in (8, 4):
+    _, _, n = barrier(conn)
+    verdict = "sealed" if n > 1 else "the fill leaks through"
+    print(f"LINE_{conn}: the free area is {n} component(s)  -> {verdict}")
+```
+
+```{code-cell} ipython3
+fig, axes = plt.subplots(2, 1, figsize=(5.4, 4.6))
+for ax, conn in zip(axes, (8, 4)):
+    m, labels, n = barrier(conn)
+    ax.imshow(np.where(m, 0, labels),
+              cmap=ListedColormap([C_FOUR, C_OFF, C_LINE]), vmin=0, vmax=2)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_title(f"LINE_{conn}: {n} free component(s)")
+fig.legend(
+    handles=[
+        Patch(facecolor=C_FOUR, label="the line"),
+        Patch(facecolor=C_OFF, label="one side"),
+        Patch(facecolor=C_LINE, label="the other side"),
+    ],
+    loc="lower center", ncols=3, frameon=False, fontsize=8,
+)
+fig.suptitle("only the 4-connected line divides the array in two", y=1.0)
+fig.tight_layout(rect=(0, 0.07, 1, 1))
+```
+
+The top panel is a single region: the fill has walked through the line. The
+bottom panel is two. If you draw a boundary and then fill on one side of it,
+that is the whole ballgame, and it is why the option exists.
+
++++
+
+### What scikit-image would need
+
+`skimage.draw` has no 4-connected line, and `line_nd`'s "ndim-connected"
+guarantee is the diagonal one. Closing the gap needs no new rasteriser: take
+the Bresenham line and insert a corner pixel at each diagonal step, choosing
+whichever of the two candidate corners lies nearer the true segment.
+
+```{code-cell} ipython3
+def line_4(start, stop):
+    """Bresenham, with a corner pixel inserted at each diagonal step."""
+    ii, jj = line(start[0], start[1], stop[0], stop[1])
+    origin = np.asarray(start, float)
+    direction = np.asarray(stop, float) - origin
+
+    def offset(pixel):
+        v = np.asarray(pixel, float) - origin
+        return abs(v[0] * direction[1] - v[1] * direction[0])
+
+    out = [(int(ii[0]), int(jj[0]))]
+    for i, j in zip(ii[1:].tolist(), jj[1:].tolist()):
+        pi, pj = out[-1]
+        if i != pi and j != pj:
+            out.append(min(((pi, j), (i, pj)), key=offset))
+        out.append((i, j))
+    return out
+```
+
+```{code-cell} ipython3
+conn_ok = count_ok = 0
+for a, b in box:
+    pix = line_4(a, b)
+    conn_ok += ndi.label(as_mask(pix), structure=S4)[1] == 1
+    count_ok += len(set(pix)) == abs(a[0] - b[0]) + abs(a[1] - b[1]) + 1
+print(f"over {len(box)} endpoint pairs")
+print(f"   4-connected           {conn_ok / len(box):.1%}")
+print(f"   Manhattan pixel count {count_ok / len(box):.1%}")
+
+arr = np.zeros((28, 40), np.uint8)
+for i, j in line_4((2, 0), (25, 39)):
+    arr[i, j] = 255
+print(f"   seals the array       {ndi.label(~(arr > 0), structure=S8)[1] > 1}")
+same = sum(set(line_4(a, b)) == cv_line(a, b, 4) for a, b in box)
+print(f"   same pixels as LINE_4 {same / len(box):.1%}")
+```
+
+It meets both guarantees and it seals. Where it differs from OpenCV, at the
+rate printed above, the difference is the corner chosen at each diagonal step —
+a tie-breaking question of exactly the kind the rest of this notebook is about,
+not a difference in what the two functions promise.
+
+```{code-cell} ipython3
+a, b = (4, 4), (7, 13)
+fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.4))
+for ax, pix, color, name in (
+    (axes[0], set(line_4(a, b)), C_ND, "candidate line_4"),
+    (axes[1], cv_line(a, b, 4), C_FOUR, "opencv LINE_4"),
+):
+    pixel_axes(ax, (5, 12), name)
+    fill(ax, {(i - 3, j - 3) for i, j in pix}, color)
+    exact(ax, (a[0] - 3, a[1] - 3), (b[0] - 3, b[1] - 3), color="white")
+fig.suptitle("same guarantees, different corners", y=1.04)
+fig.tight_layout()
+```
+
+## 9. Two ways forward
 
 +++
 
@@ -592,7 +1041,7 @@ in a patch release.
 
 +++
 
-## 9. What not to do
+## 10. What not to do
 
 Do not try to make `line` and `line_nd` agree. Even with both fixes they still
 differ on a small fraction of segments, and that residue is inherent: an exact

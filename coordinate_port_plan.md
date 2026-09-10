@@ -128,14 +128,21 @@ An angle has no meaning until the coordinate frame is fixed.  Every angle
 changes meaning when the frame changes, even when no line of code changes.
 Treat angles as their own group and do them after Group B.
 
-* `rotate(angle=)`
+Two separate things move here: the **sign**, per decision D2, and for `rotate`
+the **units**, per decision D6. They are independent, they affect the same
+scalar argument, and both are silent.
+
+* `rotate(angle=)` — sign **and** units: degrees today, radians after D6
+* `swirl(rotation=)` — sign only; already radians, but undocumented
 * `AffineTransform(rotation=)`, `EuclideanTransform`, `SimilarityTransform`
 * `regionprops.orientation` (`measure/_regionprops.py:679`)
 * `draw.ellipse(rotation=)`, `draw.ellipse_perimeter(orientation=)`
 * `EllipseModel` `theta`
 * `hough_line` `theta`, `hough_ellipse` `orientation`
 * `filters.gabor(theta=)`, `gabor_kernel(theta=)`
-* `radon(theta=)`, `warp_polar`
+* `radon(theta=)`, `iradon`, `iradon_sart`, `order_angles_golden_ratio` — in
+  degrees today, radians after D6
+* `warp_polar`
 
 
 ## 4. Decisions to make before any code changes
@@ -275,6 +282,74 @@ Confirm that we remove it rather than keep it as `order='ij'`.
 Replace with one `shift` tuple in array order, or with `shift_axis0` /
 `shift_axis1`.  A tuple is closer to the rest of the API.
 
+
+### D6. Angle units — DECIDED: radians
+
+**Decision: `transform.rotate` and `transform.swirl` take radians.**
+
+Most of the library already does. Measured across `src/_skimage2`, angles are
+documented in radians in `measure/fit.py`, `filters/_gabor.py`,
+`feature/orb.py`, `draw/draw.py`, the Hough modules, `feature/texture.py` and
+the transform constructors. Only two APIs use degrees:
+
+| Function | Parameter | Units today |
+| --- | --- | --- |
+| `transform.rotate` | `angle` | **degrees** (`transform/_warps.py:363`) |
+| `transform.swirl` | `rotation` | **radians already**, undocumented |
+| `radon`, `iradon`, `iradon_sart`, `order_angles_golden_ratio` | `theta` | **degrees** (`transform/radon_transform.py:27, 209, 332, 407`) |
+| everything else carrying an angle | — | radians |
+
+So the two named functions need different work.
+
+**`rotate` changes units.** `rotate(image, 30)` becomes
+`rotate(image, np.pi / 6)`. Anyone who does not update gets a rotation 57.3
+times too large, from a call that stays perfectly valid. Together with the
+direction question of D2, this makes `rotate` the single most dangerous
+signature in the port: two independent silent changes to one scalar argument.
+
+**`swirl` changes nothing numerically.** Its `rotation` is already in radians,
+which the docstring never states. Measured: `rotation=2*pi` differs from
+`rotation=0` by 4e-14, and `rotation=360` differs by 9.8e-01, so a full turn is
+a no-op only in radians. The work here is to document the existing behaviour,
+not to change it.
+
+**A tripwire worth considering.** Unlike the coordinate flip, this one has a
+usable heuristic. Radian rotations are almost always within a few multiples of
+`2 * pi`, while a stale degrees call is typically 15, 30, 45, 90 or 180. A
+warning on `abs(angle) > 2 * pi` — "angle is in radians; did you mean
+`np.deg2rad(30)`?" — would catch nearly every unported call. It is a heuristic
+and would occasionally fire on a legitimate large rotation, so it should be a
+warning and never an error. Decide whether to ship it.
+
+The same test is far more reliable for the `radon` family, because `theta`
+there is an array spanning most of a half turn. Any stale call passes values up
+to 180 where the new maximum is `pi`, so a check on `max(abs(theta)) > 2 * pi`
+catches essentially every unported call with no realistic false positive.
+
+**The `radon` family converts too.** `radon`, `iradon`, `iradon_sart` and
+`order_angles_golden_ratio` all take `theta` in degrees today, and all move to
+radians. The change reaches past the signatures, into three places that
+hard-code 180:
+
+| Where | What | Becomes |
+| --- | --- | --- |
+| `radon_transform.py:62` | `theta = np.arange(180)`, the `radon` default | `np.linspace(0, np.pi, 180, endpoint=False)` |
+| `radon_transform.py:259` | `iradon` default, `np.linspace(0, 180, n, endpoint=False)` | the same span in radians |
+| `radon_transform.py:490` | `iradon_sart` default, likewise | the same span in radians |
+| `radon_transform.py:102` | `np.deg2rad(theta)` inside `radon` | delete |
+| `radon_transform.py:308` | `np.deg2rad(theta)` inside `iradon` | delete |
+| `radon_transform.py:357` | `interval = 180` in `order_angles_golden_ratio` | `np.pi` |
+| `_radon_transform.pyx:35` | `theta = theta / 180. * M_PI` in `bilinear_ray_sum` | delete |
+| `_radon_transform.pyx:122` | the same, in `bilinear_ray_update` | delete |
+
+Two of those are easy to miss. The Cython takes **degrees** and converts on
+entry, so `iradon_sart` hands it degrees with no Python-level `deg2rad` to grep
+for. And `order_angles_golden_ratio` holds no conversion at all: its
+golden-ratio ordering is modulo a half turn, spelled `180`, which has to become
+`np.pi` or the ordering silently degrades.
+
+The defaults change representation but not meaning, so a caller who never
+passed `theta` sees no difference.
 
 ## 5. Mechanism
 
@@ -469,10 +544,20 @@ they fail loudly if the adapter is wrong.
 Only after Stage 4 lands, because an angle has no meaning until the frame is
 fixed.  Apply decision D2.
 
-5.1 `rotate`, and the `rotation` parameter of the matrix transforms.
+5.1 `rotate`: the direction, per D2, and degrees to radians, per D6. Also the
+    `rotation` parameter of the matrix transforms. One migration guide entry
+    must cover both changes, because a reader who fixes only one is still
+    wrong.
+5.1a `swirl`: document that `rotation` is in radians, and decide the direction
+    question of D2. No numeric change.
 5.2 `regionprops.orientation`.
 5.3 `draw.ellipse` and `draw.ellipse_perimeter`; `EllipseModel.theta`.
-5.4 `hough_line`, `hough_ellipse`, `radon`, `warp_polar`.
+5.4 `hough_line`, `hough_ellipse`, `warp_polar`.
+5.4a The `radon` family: `radon`, `iradon`, `iradon_sart` and
+    `order_angles_golden_ratio` from degrees to radians, including the three
+    defaults, the two `np.deg2rad` calls, the `interval = 180` in the angle
+    ordering, and the two `theta / 180. * M_PI` conversions inside
+    `_radon_transform.pyx`. See the table in D6.
 5.5 `filters.gabor` and `gabor_kernel`.
 
 ### Stage 6 — close out
@@ -520,6 +605,13 @@ not.  A test that cannot fail is worse than no test.
 including angles in functions that no pull request touched.  Stage 5 exists to
 make this explicit, but the risk is that a function is forgotten.  The Group C
 list in Section 3 is the register; keep it up to date.
+
+**Only one of the two `rotate` changes applied.**  Its `angle` moves in sign
+(D2) and in units (D6). A user who reads the release notes and fixes only the
+units still gets a picture rotated the wrong way, and one who fixes only the
+sign is out by a factor of 57.3. Neither raises. The two must be described
+together, in one migration entry and one release note, never as separate
+bullets.
 
 **Lost fast paths.**  A shim that wraps a transform in a plain callable makes
 SK1 `warp` much slower.  Section 5.3 avoids this.  Add a benchmark check to
