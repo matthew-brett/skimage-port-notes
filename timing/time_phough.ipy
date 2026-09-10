@@ -1,0 +1,8 @@
+import skimage as ski
+
+from skimage.transform import probabilistic_hough_line
+
+img = ski.data.camera()
+edges = ski.feature.canny(img, 2, 1, 25)
+
+%timeit probabilistic_hough_line(edges, 10)
