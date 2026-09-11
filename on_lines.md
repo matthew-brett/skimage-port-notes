@@ -508,6 +508,19 @@ step along the line in equal increments and round. The approach costs floating
 point arithmetic that Bresenham avoids, and buys two things Bresenham cannot
 offer — any number of dimensions, and endpoints that need not be integers.
 
+It is also the textbook definition of digitising a curve.
+[Knuth (1990)](https://arxiv.org/abs/cs/9301112) sets it out for any parametric
+path `z(t) = (x(t), y(t))` as
+
+```
+    round z(t) = (round x(t), round y(t))
+```
+
+"as `t` varies, where `round(a)` is the integer nearest `a`" — which is exactly
+what `line_nd` computes, one axis at a time. So `line_nd` is not an ad hoc
+choice; it is the standard digitisation, and the interesting question is what it
+does at the one place that definition does not reach.
+
 ```
 npoints = ceil(max(abs(stop - start)))
 coords  = linspace(start, stop, npoints).T
@@ -518,6 +531,21 @@ The rounding is `np.round`, which sends a half to the nearest **even** integer,
 so `0.5` becomes `0` while `1.5` becomes `2`. Rounding each axis independently
 can then open a two-pixel gap between consecutive samples, and `_round_safe`
 guards against that one case by falling back to `np.floor`.
+
+Knuth reaches the same fork and declines to take it. Immediately after giving
+the rule he writes that "we need to be careful, of course, when rounding values
+that are halfway between integers, because `round(a)` is undefined in such
+cases", and then assumes the path never passes through a pixel centre: exact
+hits "occur with probability zero", and "an infinitesimal shift of the path can
+be used to avoid pixel centers in general, therefore avoiding the ambiguities
+pointed out in Bresenham's interesting discussion".
+
+So the tie is not an oversight in the definition. It is the one case the
+definition leaves open, flagged as such, with a pointer to the paper that works
+through the consequences. `_round_safe` is `skimage` meeting that case in
+practice, where "probability zero" is not available: integer endpoints put the
+midpoint of an odd-length run exactly on a half every time. Section 10 comes
+back to what Knuth's infinitesimal shift means for the choice of rounding rule.
 
 Its test is `coords[0] % 1 == 0.5 and coords[1] - coords[0] == 1`. The first
 half is a **fractional part** of exactly `.5`, so it holds at any whole number
@@ -646,9 +674,24 @@ Nothing in the guard is direction-aware except that one comparison. The
 fractional-part half of the test, `coords[0] % 1 == 0.5`, holds whichever way
 the axis runs, and the docstring reasons only in the ascending direction — its
 worked examples are `np.arange(0.5, 8, 1)` and `[0.5, 1.25, 2., 2.75, 3.5]`,
-both counting up. It reads as an oversight rather than a decision. Testing
-`abs(coords[1] - coords[0]) == 1` would close this particular hole; section 10
-argues for removing the need for the guard instead.
+both counting up. It reads as an oversight rather than a decision.
+
+The pull request that added `line_nd`,
+[#2043](https://github.com/scikit-image/scikit-image/pull/2043), supports that
+reading twice over. Its opening post proposes the guard as
+
+```python
+np.all(arr % 1 == 0.5)
+```
+
+over **all** the coordinates, where the merged code tests only `coords[0]`; and
+it describes the remedy as replacing "round with floor (ie rounding towards
+0)", which `np.floor` is not — it rounds towards minus infinity, and the two
+differ for exactly the descending values that turn out to break. The ascending
+mental model is visible in the original wording, before any code was written.
+
+Testing `abs(coords[1] - coords[0]) == 1` would close this particular hole;
+section 10 argues for removing the need for the guard instead.
 
 So every rounding in the rest of this notebook is plain `np.round`, half-to-even
 and all. `_round_safe` never comes into it, and the tie behaviour of section 4
@@ -805,6 +848,14 @@ stepping late as the segment moves, because `np.round` sends `0.5` to `0` but
 ### Reversal symmetry
 
 Naming the ends in the other order should draw the same pixels.
+
+This is the older of the two questions.
+[Bresenham (1987)](https://ieeexplore.ieee.org/document/4057178) devotes a paper
+to it: an implementation must "resolve *ties* in which two candidate grid points
+have an equal error metric", and "equal error metric ambiguity can permit
+algorithmic selection of raster points for a line to differ depending on the
+direction it is drawn". That is the defect measured below, named by the author
+of the algorithm twenty-five years after he published it.
 
 ```{code-cell} ipython3
 fig, axes = plt.subplots(1, 4, figsize=(9.6, 2.1))
@@ -1633,9 +1684,73 @@ two functions.
 Half-to-even makes the drawn shape depend on the parity of an absolute
 coordinate. Nothing wants that.
 
-`_round_safe` is not a partial fix for that, and it is worth being precise
-about what it is. Half-to-even has **two** distinct consequences, and the guard
-addresses one of them completely while leaving the other alone.
+Rounding half up has a pedigree here, not just a property. Section 3 quoted
+Knuth stepping around the tie by an "infinitesimal shift of the path". Half-up
+*is* that shift, written down: `floor(x + 1/2)` is the limit of
+`round(x + e)` as `e` falls to zero from above, so every tie resolves as if the
+path had been nudged by a hair in one fixed direction. Half-to-even is not the
+limit of any shift, because which way a tie goes depends on the parity of the
+neighbouring integer rather than on the path — which is the same fact as its
+failure of translation invariance, seen from the other side.
+
+**The objection on the record.** When this was proposed during review of
+[#2043](https://github.com/scikit-image/scikit-image/pull/2043#issuecomment-493821746),
+Juan Nunez-Iglesias answered that `np.floor` makes evenly spaced samples come
+out unevenly spaced, where `np.round` does not:
+
+```{code-cell} ipython3
+spaced = np.array([0.5, 1.25, 2.0, 2.75, 3.5])   # the example from the PR
+for name, rule in (("np.round", np.round),
+                   ("np.floor", np.floor),
+                   ("floor(x) + 0.5, as written in the PR",
+                    lambda a: np.floor(a) + 0.5),
+                   ("floor(x + 0.5), half up", lambda a: np.floor(a + 0.5))):
+    got = rule(spaced).astype(int)
+    print(f"   {name:<38}{str(got):<18}steps {np.diff(got)}")
+```
+
+Two things are true at once. The expression tested in the review,
+`(np.floor(coords0) + 0.5).astype(int)`, is not half-up rounding — `astype(int)`
+truncates, so it returns plain `np.floor`. Half-up is `np.floor(x + 0.5)`, and
+it was never evaluated.
+
+But the objection partly survives evaluation anyway. Half-up gives
+`[1, 1, 2, 3, 4]`, with a repeat, where `np.round` gives `[0, 1, 2, 3, 4]` with
+none. So for this spacing `np.round` really does produce the tidier sequence.
+
+What settles it is that the repeat is not a defect. Section 2 showed a shallow
+line advancing along its major axis while the minor axis stands still; repeats
+on a minor axis are what a shallow line *is*. A gap is a different kind of
+event: it breaks the line. The two are not comparable costs, and only one of
+them is a correctness failure.
+
+```{code-cell} ipython3
+def line_nd_halfup_pixels(a, b):
+    """Ordered pixels from `line_nd` with half-up rounding."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    npoints = int(np.ceil(np.max(np.abs(b - a)))) + 1
+    coords = np.floor(np.linspace(a, b, npoints, endpoint=True).T + 0.5).astype(int)
+    return [tuple(int(v) for v in c) for c in coords.T]
+
+
+print("the PR's spacing, drawn as an actual line")
+for a, b in (((0.5, 0.0), (3.5, 4.0)), ((0, 0), (3, 4))):
+    now = nd_pixels(a, b)
+    up = line_nd_halfup_pixels(a, b)
+    hop = lambda pix: [int(np.max(np.abs(np.subtract(y, x))))
+                       for x, y in zip(pix, pix[1:])]
+    print(f"   {a} -> {b}")
+    print(f"      line_nd now   {now}  steps {hop(now)}")
+    print(f"      half up       {up}  steps {hop(up)}")
+```
+
+Both are 8-connected, both have the same length, and they differ in which pixel
+stands for the tie. The uneven spacing the review worried about does not reach
+the drawn line.
+
+`_round_safe` is not a partial fix for the parity problem, and it is worth being
+precise about what it is. Half-to-even has **two** distinct consequences, and
+the guard addresses one of them while leaving the other alone.
 
 The first is a **gap**. `line_nd` samples at most one pixel apart, so rounding
 must not put two consecutive samples two pixels apart. Half-to-even can:
@@ -1749,6 +1864,14 @@ fig.tight_layout()
 
 ### Fix 2: normalise the endpoint order in `line`
 
+Knuth ends his note with a requirement on the renderer, not on the caller. If
+two halves of a bisected angle are to look alike, he writes, the bisecting line
+must be one about which "reflections ... always map pixels into pixels", and
+"furthermore, your line-rendering algorithm should produce symmetrical results
+about the line of reflection" — with a citation to Bresenham's ambiguities
+paper. A renderer that changes its answer when the ends are swapped does not
+produce symmetrical results, so it cannot meet that condition.
+
 Sorting the two endpoints before rasterising makes the result independent of
 which end was named first. Any rule that depends only on the unordered pair
 works; OpenCV uses a different one from `sorted`, and matching it exactly is
@@ -1810,7 +1933,53 @@ in a patch release.
 
 +++
 
-## 11. What not to do
+## 11. What review already knew
+
+Both defects in this notebook were raised before `line_nd` was merged, and the
+literature naming them is older still.
+
+`line_nd` arrived in
+[#2043](https://github.com/scikit-image/scikit-image/pull/2043), opened in April
+2016 and merged in September 2019. The rounding question is in the opening post:
+half-to-even "would result in broken lines", and the guard is proposed as the
+remedy in the same paragraph. It went in as written.
+
+At the moment of merge Stéfan van der Walt recorded two reservations
+([comment](https://github.com/scikit-image/scikit-image/pull/2043#issuecomment-535608255)):
+"my concern with the rounding function used here, and also that we have not
+properly explored existing N-d line drawing methods". Sections 3 and 10 are the
+first of those; section 9 is the second. The reply was that the API was now
+fixed and improvements were welcome as later pull requests
+([comment](https://github.com/scikit-image/scikit-image/pull/2043#issuecomment-535730329)),
+and none followed.
+
+The same thread also asks the question section 9 arrives at from the other
+direction. Mark Harfouche asked whether `line` should be deprecated in favour of
+`line_nd`
+([comment](https://github.com/scikit-image/scikit-image/pull/2043#issuecomment-519751600)),
+and was told it need not be settled there. Section 9 concludes it should not be:
+they are different algorithms with different guarantees, and the naming is what
+needs fixing rather than the count of functions.
+
+The two papers Stéfan linked in that thread are the ones cited above.
+[Bresenham (1987)](https://ieeexplore.ieee.org/document/4057178) is the source
+for section 6: equal-error ties let the chosen pixels "differ depending on the
+direction it is drawn".
+[Knuth (1990)](https://arxiv.org/abs/cs/9301112) supplies the digitisation rule
+`line_nd` implements, the explicit statement that it is undefined on a tie, and
+the closing requirement that a renderer be symmetric.
+
+Knuth's actual theorem is about something this notebook does not cover, and it
+is worth knowing where the boundary is. He proves that when a line of slope
+`a/b` meets one of slope `c/d`, the junction takes one of exactly `|ad - bc|`
+distinct digital shapes as the meeting point moves, each equally likely. That is
+a statement about **joins**, not about single segments: it says a polyline's
+corners will not all look alike however good the line renderer is. No choice of
+rounding rule removes it.
+
++++
+
+## 12. What not to do
 
 Do not try to make `line` and `line_nd` agree. Even with both fixes they still
 differ on a small fraction of segments, and that residue is inherent: an exact

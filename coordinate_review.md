@@ -1,3 +1,17 @@
+---
+jupytext:
+  formats: ipynb,md:myst
+  text_representation:
+    extension: .md
+    format_name: myst
+    format_version: 0.13
+    jupytext_version: 1.19.1
+kernelspec:
+  name: python3
+  display_name: Python 3 (ipykernel)
+  language: python
+---
+
 # Coordinate review
 
 Partially distilled from AI summaries with:
@@ -12,13 +26,13 @@ Let us imagine a 2D grayscale image.
 
 To be more concrete, let's load such an image:
 
-```{python}
+```{code-cell} ipython3
 import numpy as np
 import skimage as ski
 
 import matplotlib.pyplot as plt
 
-img = ski.data.camerman()
+img = ski.data.camera()
 ```
 
 Let us now imagine that we want to identify a pixel by its
@@ -45,7 +59,7 @@ This interprets the first number (here 5) as the *position* along the first axis
 
 In other words, the pixel at (5, 10), using the array coordinate system, is given by the Numpy operation:
 
-```{python}
+```{code-cell} ipython3
 img[5, 10]
 ```
 
@@ -54,7 +68,7 @@ axes.
 
 Here is the `cameraman` image displayed in Matplotlib.
 
-```{python}
+```{code-cell} ipython3
 plt.imshow(img)
 ```
 
@@ -79,7 +93,7 @@ Very confusingly, the first axis in the imaging coordinate system corresponds to
 
 Imagine I have some coordinate (11, 20).  If that is a coordinate in the imaging coordinate system, then the equivalent pixel in that coordinate system is given by:
 
-```{python}
+```{code-cell} ipython3
 img[20, 11]
 ```
 
@@ -111,14 +125,14 @@ coordinates, and `img[10, 5]` if it's in imaging coordinates.
 For a 2D image, there appears to be no ambiguity in the term
 "row" or "column".  Both the "ij" and "xy" convention think of the row of an image as going left to right in the display, and therefore, in terms of the image array, the row at position 5 is given by:
 
-```{python}
+```{code-cell} ipython3
 # Row at position 5.
 img[5, :]
 ```
 
 Columns in both conventions run top to bottom, so the column at position 10 is given by:
 
-```{python}
+```{code-cell} ipython3
 # Column at position 10.
 img[:, 10]
 ```
@@ -133,11 +147,10 @@ We've emphasized that the "rc" convention is the same as the "ij" convention for
 
 Now consider a three-dimensional image:
 
-```{python}
+```{code-cell} ipython3
 img_3d = ski.data.cells3d()
 img_3d.shape
 ```
-
 
 `row` and `column` are ambiguous; we should not use them.
 

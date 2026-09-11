@@ -11,3 +11,4 @@ __pycache__/
 # Jupyter Book build products
 _build/
 .jupyter_cache/
+.scratch/

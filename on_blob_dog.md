@@ -38,9 +38,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 ```{code-cell} ipython3
 import skimage as ski
-from skimage.feature import blob_dog, blob_log, blob_doh
-from skimage.transform import integral_image
-from _skimage2.feature._hessian_det_appx import _hessian_matrix_det as box_det
+from skimage.feature import blob_dog, blob_log, blob_doh, hessian_matrix_det
 ```
 
 ```{code-cell} ipython3
@@ -341,7 +339,9 @@ for _ in range(12):
 
 offsets = np.array(offsets)
 print(f"{len(offsets)} blobs over random centres and radii")
-print(f"   distinct offsets : {sorted(set(map(tuple, offsets)))}")
+seen = sorted({(float(a), float(b)) for a, b in offsets})
+print("   distinct offsets : "
+      + ", ".join(f"({a:+.0f}, {b:+.0f})" for a, b in seen))
 print(f"   mean offset      : {offsets.mean(axis=0)}")
 ```
 
@@ -355,13 +355,12 @@ integer. Distinct scales therefore collapse onto the same filter.
 
 ```{code-cell} ipython3
 photo = ski.util.img_as_float(ski.data.camera())[::2, ::2]
-table = np.ascontiguousarray(integral_image(photo))
-base = np.asarray(box_det(table, 3.0))
+base = hessian_matrix_det(photo, sigma=3.0, approximate=True)
 
 print(f"{'sigma':>8}{'int(3*sigma)':>14}{'identical to sigma = 3.0':>28}")
 for sigma in (3.0, 3.2, 3.32, 3.34, 3.67, 4.0):
-    same = np.array_equal(np.asarray(box_det(table, float(sigma))), base)
-    print(f"{sigma:>8}{int(3 * sigma):>14}{str(same):>28}")
+    got = hessian_matrix_det(photo, sigma=sigma, approximate=True)
+    print(f"{sigma:>8}{int(3 * sigma):>14}{str(np.array_equal(got, base)):>28}")
 ```
 
 Asking for `sigma = 3.0`, `3.2` or `3.32` returns bit-identical planes. The
@@ -374,11 +373,10 @@ altogether.
 
 ```{code-cell} ipython3
 small = np.exp(-((rows[:81, :81] - 40) ** 2 + (cols[:81, :81] - 40) ** 2) / 32)
-small_table = np.ascontiguousarray(integral_image(small))
 print(f"{'sigma':>7}{'size':>6}{'lobe':>6}{'centre response':>18}")
 for sigma in (0.5, 0.9, 1.0, 2.0, 4.0):
     size = int(3 * sigma)
-    got = np.asarray(box_det(small_table, float(sigma)))[40, 40]
+    got = hessian_matrix_det(small, sigma=sigma, approximate=True)[40, 40]
     print(f"{sigma:>7}{size:>6}{size // 3:>6}{got:>18.3e}")
 ```
 
@@ -427,9 +425,12 @@ def exact_doh(image, sigma, mode="nearest", trunc=8):
 
 
 def box_doh(image, sigma):
-    """As `blob_doh` calls it: on the integral image."""
-    return np.asarray(box_det(np.ascontiguousarray(integral_image(image)),
-                              float(sigma)))
+    """The box-filter determinant, by the public route.
+
+    `hessian_matrix_det(..., approximate=True)` builds the integral image and
+    calls the same routine `blob_doh` uses; the two agree bit for bit.
+    """
+    return hessian_matrix_det(image, sigma=sigma, approximate=True)
 ```
 
 ```{code-cell} ipython3
@@ -537,8 +538,6 @@ them touches `blob_doh`, which calls `_hessian_matrix_det` directly.
 `hessian_matrix_det` is the function to watch, because it has two paths.
 
 ```{code-cell} ipython3
-from skimage.feature import hessian_matrix_det
-
 print(f"{'sigma':>6}{'approximate=True':>20}{'approximate=False':>21}")
 for sigma in (1.0, 2.0, 4.0):
     pad = 2 * int(8 * sigma + 0.5) + 1
