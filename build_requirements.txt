@@ -5,8 +5,8 @@ ipykernel
 # Imported by the notebooks.
 numpy
 scipy
-scikit-image
 scikit-image@git+https://github.com/scikit-image/scikit-image@main
+pooch
 matplotlib
 opencv-python-headless
 pillow
