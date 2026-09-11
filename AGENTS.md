@@ -23,4 +23,9 @@
 
 ## Output
 
-- Please write output files, by default, into the `port-notes` directory.
+- Write output files, by default, into the `port-notes` directory.
+
+## Comparative software
+
+- In explanations, review any alternative, well-used implementations in the
+  same field, starting with those available in Python.  For example, for image processing, consider Pillow, and OpenCV.

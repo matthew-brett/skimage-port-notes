@@ -540,6 +540,9 @@ Any order.  Each is independent of the others.
 3.6 `draw.ellipsoid` and `ellipsoid_stats`: fold `a, b, c` into `radii` and
     reverse them, since they are documented as x, y, z.
 3.8 `draw.line_nd`: round half up instead of half to even, per Section 13.3.
+    This also fixes the disconnected output `_round_safe` misses on a
+    descending axis (Section 12.2), so it is a defect fix, not only a
+    convention change.
 3.9 `draw.line` and `line_aa`: normalise the endpoint order, per Section 13.3.
 3.7 `haar_like_feature`, `draw_haar_like_feature`, `multiblock_lbp` and
     `draw_multiblock_lbp`: fold `r, c` into `start` and `width, height` into an
@@ -1050,9 +1053,35 @@ present and the output holds exactly `max(|dr|, |dc|) + 1` pixels.
 the segment at that many equally spaced parameters with `np.linspace`, then
 rounds each axis independently.  Rounding is `np.round`, which is half-to-even,
 guarded by `_round_safe`: that guard swaps in `np.floor` when the first
-coordinate is exactly `.5` and the step is exactly 1, to stop half-to-even
-opening a two-pixel gap.  `endpoint` is False by default, so the stop point is
-excluded unless asked for.
+coordinate has a fractional part of exactly `.5` and the step is exactly 1, to
+stop half-to-even opening a two-pixel gap.  `endpoint` is False by default, so
+the stop point is excluded unless asked for.
+
+Two details of that guard matter for the port, both measured in `on_lines.md`
+section 3.
+
+First, the fractional-part test is `coords[0] % 1 == 0.5`, so it holds at any
+half — `1.5`, `3.5` and `-2.5` all fire it, not only `0.5`.  Both halves of the
+test must hold, and unit spacing occurs only on the axis with furthest to
+travel, so integer endpoints never reach the guard at all: for integer input
+`line_nd` is exactly `np.round` of its own samples, on 50400 of 50400 pairs.
+
+Second, **the guard is direction-sensitive, and this is a live defect.**  The
+spacing test is `coords[1] - coords[0] == 1`, and that `1` is signed.  An axis
+counting *down* through the same halves is spaced by `-1`, the test fails, and
+`np.round` opens the gap the guard exists to prevent:
+
+    line_nd((3.5, 0), (0.5, 3), endpoint=True)   [(4,0), (2,1), (2,2), (0,3)]
+    line_nd((0.5, 3), (3.5, 0), endpoint=True)   [(0,3), (1,2), (2,1), (3,0)]
+
+One segment, named each way round.  The first breaks into three connected
+components; the second is 8-connected.  Over random half-integer endpoints in a
+20x20 box: 0 of 2707 gapped when every axis counts up, 5100 of 7271 when any
+axis counts down.  The docstring reasons only in the ascending direction, so
+this reads as an oversight rather than a decision.
+
+It also means `line_nd` is reversal-symmetric for integer endpoints only, not
+in general.
 
 ### 12.3 Measured differences
 
@@ -1066,7 +1095,7 @@ excluded unless asked for.
 | Connectivity | diagonal-connected | diagonal-connected — the same |
 | Exact half-way tie | always steps early | half-to-even, so it depends on the parity of the coordinate |
 | Translation invariant | **yes** (0 failures in 8019 cases) | **no** (5184 failures) |
-| Reversal symmetric | **no** (2000 failures) | **yes** (0 failures) |
+| Reversal symmetric | **no** (2000 failures) | **yes** (0 failures) — integer endpoints only; see 12.2 |
 | Agreement, integer ends, `endpoint=True` | 79% identical, **21% different** | |
 
 The disagreement is entirely about where the minor axis steps when the true
@@ -1087,10 +1116,13 @@ Neither function is a generalisation of the other, and neither dominates:
 symmetry you want when drawing a path in either direction.
 
 Keep both in this port.  Give each a "See Also" that states the difference in
-one line, so the identical signatures do not mislead.  Merging them, or making
-`line_nd` translation-invariant by replacing `_round_safe` with a rounding rule
-that does not depend on parity, are separate proposals; the first changes
-output for a fifth of all lines and the second for the tie cases.
+one line, so the identical signatures do not mislead.  Merging them is a
+separate proposal, and changes output for a fifth of all lines.
+
+Replacing `_round_safe` with a rounding rule that does not depend on parity is
+also separate, but it is not merely a preference about tie cases: as 12.2
+shows, the current guard lets `line_nd` return a disconnected line for ordinary
+half-integer input.  Section 13.3 carries it as Change 1.
 
 
 ## 13. How our line drawing compares to other libraries
@@ -1135,12 +1167,35 @@ half-way tie the pixel chosen depends on the parity of the absolute
 coordinate.  Drawing the same shape at row 0 and at row 1 gives different
 shapes.  No comparator library behaves this way, and the existing
 `_round_safe` guard is itself an admission that the rule misbehaves — it
-patches one case rather than fixing the rule.
+patches one case rather than fixing the rule, and as section 12.2 shows it does
+not even patch that case completely, since it tests a signed `+1` step and so
+misses every descending axis.
+
+Half-to-even has two separate consequences, and the guard aims at only one of
+them.  The first is a **gap**, which the guard catches on an ascending axis and
+misses on a descending one.  The second is the **parity dependence** itself,
+which produces no gap, so the guard never sees it.
 
 Rounding half up, `np.floor(x + 0.5)`, is translation-invariant by
 construction, since `floor(x + t + 0.5) == floor(x + 0.5) + t` for integer `t`.
-Measured: it gives **100% on both symmetries** and removes the need for
-`_round_safe`.  It changes output for **19.4%** of endpoint pairs.
+It also cannot gap, in either direction, and that is provable rather than
+merely measured: `floor(x + 1/2) <= x + 1/2` while `floor(x + 1/2) > x - 1/2`
+**strictly**, so the rounding error lies in the half-open interval
+`(-1/2, +1/2]`; two samples at most 1 apart therefore round to values strictly
+less than 2 apart, hence at most 1.  `np.round` attains both ends of the closed
+`[-1/2, +1/2]`, which is exactly why it can jump 2.
+
+Measured: half-up gives **100% on both symmetries** and removes the need for
+`_round_safe` — not as a redundant check to delete, but because the condition
+it guards can no longer arise.  It changes output for **19.4%** of endpoint
+pairs.
+
+A one-word repair to the guard, `abs(coords[1] - coords[0]) == 1`, would close
+the descending hole on its own.  It would leave the exact float equality tests,
+the inspect-only-the-first-coordinate assumption, and the parity dependence in
+place.  Change 1 retires all four together, so prefer it; keep the repair in
+reserve as a backport for the 0.x line if the rounding change is judged too
+large there.
 
 **Change 2: normalise the endpoint order in `line`.**
 

@@ -28,7 +28,7 @@ import itertools
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Patch
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 ```
 
 ```{code-cell} ipython3
@@ -128,9 +128,23 @@ def sk_nd(p, q):
 
 ## 1. The problem
 
-A segment runs between two pixel centres. Almost every pixel it crosses is
-crossed only partly, so a rasteriser has to choose. Here is the segment from
-`(0, 0)` to `(1, 4)`, with the pixels it passes through at all.
+Turning a shape described by coordinates into a set of pixels is
+[rasterisation](https://en.wikipedia.org/wiki/Rasterisation). A segment runs
+between two pixel centres, and almost every pixel it crosses is crossed only
+partly, so the rasteriser has to choose which ones to light.
+
+Two classical answers appear in this notebook, and each of our two functions
+implements one of them.
+[Bresenham's algorithm](https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm)
+walks the pixel grid using integer arithmetic alone, deciding at each step
+whether to move on the second axis. A
+[digital differential analyser](https://en.wikipedia.org/wiki/Digital_differential_analyzer_(graphics_algorithm))
+instead samples the line at even intervals and rounds each sample to a pixel.
+They agree about most segments and disagree about some, which is what this
+notebook is about.
+
+Here is the segment from `(0, 0)` to `(1, 4)`, with the pixels it passes
+through at all.
 
 ```{code-cell} ipython3
 p, q = (0, 0), (1, 4)
@@ -152,15 +166,19 @@ every disagreement in this document.
 
 ## 2. `line`: integer Bresenham
 
-`skimage.draw.line` is classic Bresenham, implemented in Cython
-(`draw/_draw.pyx::_line`). It uses integer arithmetic only: no floats, no
-division, and no rounding function anywhere.
+`skimage.draw.line` is classic
+[Bresenham](https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm),
+implemented in Cython (`draw/_draw.pyx::_line`). It uses integer arithmetic
+only: no floats, no division, and no rounding function anywhere. That was the
+point of the algorithm when Bresenham published it in 1965, on hardware where
+a division cost far more than an addition, and it is still the reason the
+result is exactly reproducible on every machine.
 
 +++
 
 ### The terms
 
-Five quantities do all the work.
+Four quantities set the problem up.
 
 - **`delta`** — how far there is to travel on each axis, `abs(stop - start)`.
 - **`step`** — which way to travel on each axis, `+1` or `-1`.
@@ -169,12 +187,105 @@ Five quantities do all the work.
   holds exactly `delta[major] + 1` pixels.
 - **minor axis** — the other one. It advances on some iterations and not
   others. Choosing which is the whole of the algorithm.
-- **`error`** — an integer carrying how far the true line has drifted from the
-  minor coordinate currently being drawn. Its sign is the decision.
+
+Write `D` for `delta[major]` and `d` for `delta[minor]`, so that `0 <= d <= D`.
+
+Direction does not enter what follows. The arithmetic below uses `delta`
+alone, which holds absolute distances, and `step` carries the sign separately.
+So the derivation can be read as though the line ran down and to the right,
+and a cell after the code confirms that the decisions are identical in every
+octant, under transposition and under translation.
 
 The Cython source calls the axes `r` and `c`, and physically swaps them when
 the line is steep so that the driving axis is always `c`. Indexing the axes
 rather than swapping them says the same thing with less bookkeeping.
+
++++
+
+### The exact line, and the pixel that stands in for it
+
+Two quantities matter, one real and one integer, and the algorithm is entirely
+about the gap between them.
+
+After `k` steps along the major axis, the **exact** line sits at minor
+coordinate
+
+```
+    y(k) = k * d / D
+```
+
+pixels from the start. That is a real number, and for most `k` it is not a
+whole number of pixels. Nothing can be drawn there.
+
+What is drawn instead is an integer, `m(k)`, measured the same way: whole
+pixels from the start along the minor axis. Because the line starts on a pixel,
+`m(k)` is also the number of minor steps taken so far. So each step carries a
+**discrepancy**
+
+```
+    y(k) - m(k)
+```
+
+between where the line really is and where the pixel had to go. Bresenham's
+guarantee is that this stays within
+
+```
+    -1/2  <=  y(k) - m(k)  <  1/2
+```
+
+which is to say the drawn pixel is always the nearest one, with an exact tie
+resolved by taking the lower. The half-open end of that interval *is* the
+tie-breaking rule of section 4, written as mathematics.
+
++++
+
+### Turning the decision into an integer
+
+At step `k` the algorithm has drawn `m(k)` and the major axis is about to
+advance to `k + 1`. The two candidates for the next minor coordinate are
+`m(k)` and `m(k) + 1`, so the line should step when it has passed the midpoint
+between them:
+
+```
+    step the minor axis  <=>  y(k + 1)  >=  m(k) + 1/2
+```
+
+Rearranged, the quantity whose sign decides the step is
+
+```
+    y(k + 1) - (m(k) + 1/2)  =  (k + 1) * d / D  -  m(k)  -  1/2
+```
+
+This is a fraction, with a division by `D` and a half. Both can be cleared at
+once by multiplying by `2 * D`, and because `2 * D` is positive the sign — the
+only part the test uses — does not change. That product is the `error` the code
+carries:
+
+```
+    error(k)  =  2 * D * [ y(k + 1) - (m(k) + 1/2) ]
+              =  2 * (k + 1) * d  -  2 * D * m(k)  -  D
+```
+
+Every term there is an integer. **That is the whole of why Bresenham needs no
+floating point**: the decision was never really a fractional question, only a
+fractional way of writing an integer one.
+
+Two consequences give the code its three constants. Setting `k = 0` and
+`m = 0` gives the starting value
+
+```
+    error(0)  =  2 * d  -  D
+```
+
+and subtracting consecutive values gives the update. Writing `s` for 1 if the
+minor axis stepped and 0 if it did not,
+
+```
+    error(k + 1) - error(k)  =  2 * d  -  2 * D * s
+```
+
+so each iteration adds `2 * d` unconditionally, and subtracts `2 * D` as well
+whenever it steps.
 
 +++
 
@@ -190,14 +301,24 @@ def bresenham(start, stop):
     major = int(np.argmax(delta))    # the axis with further to travel
     minor = 1 - major
 
-    # Positive when the true line has passed the midpoint between the current
-    # minor pixel and the next one. Scaled by 2 * delta[major] to stay integer.
+    # `error` is the midpoint test of the previous section, cleared of
+    # fractions by the factor 2 * delta[major]:
+    #
+    #     error(k) = 2 * delta[major] * [ y(k + 1) - (m(k) + 1/2) ]
+    #
+    # The 2 clears the half, delta[major] clears the division, and both are
+    # positive so the sign is untouched. At k = 0 the minor axis has not
+    # moved, which leaves the expression below.
     error = 2 * delta[minor] - delta[major]
 
     at = start.copy()
     pixels = []
     for _ in range(delta[major]):
         pixels.append(tuple(at))
+
+        # error(k + 1) - error(k) = 2 * delta[minor] - 2 * delta[major] * s,
+        # where s is 1 when the minor axis steps and 0 when it does not. So
+        # the subtraction is conditional and the addition is not.
         if error >= 0:
             at[minor] += step[minor]
             error -= 2 * delta[major]
@@ -234,57 +355,98 @@ print(f"identical to skimage.draw.line on {matches}/{len(all_pairs)} pairs"
       f"  ({matches / len(all_pairs):.1%})")
 ```
 
-+++
+### The derivation, checked
 
-### What `error` measures
+Three claims were made above without proof. Each is a statement about every
+iteration of every line, so each can be tested as one.
 
-Two counters appear in the explanation. Both count **whole pixel steps already
-taken**, one per axis, measured from the start pixel:
-
-- `k` — steps already taken along the **major** axis. The loop takes exactly
-  one of these per iteration, so `k` is also the iteration number and the
-  number of pixels already emitted.
-- `taken` — steps already taken along the **minor** axis: an integer count of
-  rows, or of columns, whichever axis the minor one happens to be. It is a
-  count of pixels, not a distance and not a fraction.
-
-Here they are, alongside the error, for a single line:
+The first is that the drawn pixel is always the nearest, ties going low — the
+interval `[-1/2, +1/2)`.
 
 ```{code-cell} ipython3
-def trace(start, stop):
-    """The two counters and the error, at each decision."""
+def discrepancies(start, stop):
+    """Per step: k, the exact position, the drawn integer, the gap, the error."""
+    start, stop = np.array(start), np.array(stop)
+    delta = np.abs(stop - start)
+    major = int(np.argmax(delta))
+    minor = 1 - major
+    d_major, d_minor = int(delta[major]), int(delta[minor])
+    if d_major == 0:
+        return []
+
+    error, drawn, out = 2 * d_minor - d_major, 0, []
+    for k in range(d_major + 1):
+        y_exact = k * d_minor / d_major
+        out.append((k, y_exact, drawn, y_exact - drawn, error))
+        if k == d_major:
+            break
+        if error >= 0:
+            drawn += 1
+            error -= 2 * d_major
+        error += 2 * d_minor
+    return out
+
+
+gaps = [row[3] for p, q in all_pairs for row in discrepancies(p, q)]
+print(f"discrepancy over {len(all_pairs)} lines: [{min(gaps)}, {max(gaps)})")
+print(f"   never below -1/2 : {min(gaps) >= -0.5}")
+print(f"   always below 1/2 : {max(gaps) < 0.5}")
+
+print(f"\nthe tie case, (0, 0) to (1, 4):")
+print(f"{'k':>4}{'y(k) exact':>13}{'m(k) drawn':>13}{'gap':>8}{'error':>8}")
+for k, y_exact, drawn, gap, err in discrepancies((0, 0), (1, 4)):
+    print(f"{k:>4}{y_exact:>13.2f}{drawn:>13}{gap:>8.2f}{err:>8}")
+```
+
+The `-0.5` in that last line is the tie, and it is reached rather than avoided:
+an exact half steps early.
+
+The second claim is the closed form for `error(k)` itself.
+
+```{code-cell} ipython3
+def error_matches_closed_form(start, stop):
+    """Is `error` equal to 2 * D * [y(k + 1) - (m(k) + 1/2)] at every step?"""
     start, stop = np.array(start), np.array(stop)
     delta = np.abs(stop - start)
     major = int(np.argmax(delta))
     minor = 1 - major
     d_major, d_minor = int(delta[major]), int(delta[minor])
 
-    error, taken, rows = 2 * d_minor - d_major, 0, []
+    error, drawn = 2 * d_minor - d_major, 0
     for k in range(d_major):
-        rows.append((k, taken, error))
+        closed_form = 2 * d_major * ((k + 1) * d_minor / d_major - drawn - 0.5)
+        if abs(error - closed_form) > 1e-9:
+            return False
         if error >= 0:
             error -= 2 * d_major
-            taken += 1
+            drawn += 1
         error += 2 * d_minor
-    return rows
+    return True
 
 
-print(f"{'k: major steps done':>21}{'taken: minor steps done':>26}{'error':>8}")
-for k, taken, err in trace((0, 0), (2, 7)):
-    print(f"{k:>21}{taken:>26}{err:>8}")
+agree = sum(error_matches_closed_form(p, q) for p, q in all_pairs)
+print(f"error matches the closed form on {agree}/{len(all_pairs)} pairs")
 ```
 
-`taken` only ever rises by one, and only on the iterations where `error` was
-not negative.
-
-Both counters are positive whichever way the line runs. The error arithmetic
-uses `delta` alone, which holds absolute distances, and direction enters only
-through `step`. So the decision sequence is identical in every octant, under
-transposition, and under translation, which means the derivation below can be
-read as though the line ran down and to the right.
+The third is that direction never enters, so reading the derivation in one
+octant was safe.
 
 ```{code-cell} ipython3
-base = trace((0, 0), (2, 7))
+def decisions(start, stop):
+    """The error sequence alone, with no positions."""
+    start, stop = np.array(start), np.array(stop)
+    delta = np.abs(stop - start)
+    d_major, d_minor = int(delta.max()), int(delta.min())
+    error, out = 2 * d_minor - d_major, []
+    for _ in range(d_major):
+        out.append(error)
+        if error >= 0:
+            error -= 2 * d_major
+        error += 2 * d_minor
+    return out
+
+
+base = decisions((0, 0), (2, 7))
 elsewhere = {
     "up and left, (-2, -7)": ((0, 0), (-2, -7)),
     "down and left, (2, -7)": ((0, 0), (2, -7)),
@@ -292,55 +454,9 @@ elsewhere = {
     "translated by (5, 5)": ((5, 5), (7, 12)),
 }
 for name, (start, stop) in elsewhere.items():
-    print(f"{name:<24} same sequence as (2, 7): {trace(start, stop) == base}")
+    print(f"{name:<24} same error sequence as (2, 7): "
+          f"{decisions(start, stop) == base}")
 ```
-
-The test asks whether the minor axis should step *during this iteration* —
-that is, by the time the major axis has reached `k + 1`. At that point the true
-line lies `(k + 1) * delta[minor] / delta[major]` pixels from the start along
-the minor axis. The two candidates for the minor coordinate are `taken` and
-`taken + 1`, so what decides between them is the midpoint, `taken + 0.5`.
-
-`error` is exactly that overshoot, multiplied by `2 * delta[major]`:
-
-```
-error == 2 * delta[major] * ((k + 1) * delta[minor] / delta[major] - (taken + 0.5))
-```
-
-The multiplier is the trick that removes the division. Scaling by a positive
-constant cannot change a sign, so the integer `error` decides the same
-question the fraction would have, and `error >= 0` means the line has passed
-the midpoint and the minor axis must step.
-
-That is a claim about every iteration of every line, so test it as one.
-
-```{code-cell} ipython3
-def error_matches_overshoot(start, stop):
-    """Is `error` the scaled midpoint overshoot at every decision?"""
-    start, stop = np.array(start), np.array(stop)
-    delta = np.abs(stop - start)
-    step = np.sign(stop - start)
-    major = int(np.argmax(delta))
-    minor = 1 - major
-    d_major, d_minor = int(delta[major]), int(delta[minor])
-
-    error, taken = 2 * d_minor - d_major, 0
-    for k in range(d_major):
-        overshoot = (k + 1) * d_minor / d_major - (taken + 0.5)
-        if abs(error - 2 * d_major * overshoot) > 1e-9:
-            return False
-        if error >= 0:
-            error -= 2 * d_major
-            taken += 1
-        error += 2 * d_minor
-    return True
-
-
-agree = sum(error_matches_overshoot(p, q) for p, q in all_pairs)
-print(f"error equals the scaled overshoot on {agree}/{len(all_pairs)} pairs")
-```
-
-+++
 
 ### Why one minor step is always enough
 
@@ -369,8 +485,6 @@ single = sum(never_steps_twice(p, q) for p, q in all_pairs)
 print(f"one minor step per major step suffices on {single}/{len(all_pairs)} pairs")
 ```
 
-+++
-
 And the line it draws:
 
 ```{code-cell} ipython3
@@ -388,16 +502,157 @@ fig.tight_layout()
 many points it needs, samples the segment at that many equally spaced
 parameters with `np.linspace`, and then rounds **each axis independently**.
 
+That is a
+[digital differential analyser](https://en.wikipedia.org/wiki/Digital_differential_analyzer_(graphics_algorithm)):
+step along the line in equal increments and round. The approach costs floating
+point arithmetic that Bresenham avoids, and buys two things Bresenham cannot
+offer — any number of dimensions, and endpoints that need not be integers.
+
 ```
 npoints = ceil(max(abs(stop - start)))
 coords  = linspace(start, stop, npoints).T
 coords  = round(coords)        # per axis, via _round_safe
 ```
 
-The rounding function is `np.round`, which rounds a half to the nearest **even**
-integer. `_round_safe` patches one case of that: when the first coordinate is
-exactly `.5` and the step is exactly 1, it falls back to `np.floor`, to stop
-half-to-even opening a two-pixel gap.
+The rounding is `np.round`, which sends a half to the nearest **even** integer,
+so `0.5` becomes `0` while `1.5` becomes `2`. Rounding each axis independently
+can then open a two-pixel gap between consecutive samples, and `_round_safe`
+guards against that one case by falling back to `np.floor`.
+
+Its test is `coords[0] % 1 == 0.5 and coords[1] - coords[0] == 1`. The first
+half is a **fractional part** of exactly `.5`, so it holds at any whole number
+and not only at `0.5`:
+
+```{code-cell} ipython3
+def guard_fires(first, spacing=1.0, n=5):
+    """The `_round_safe` test, transcribed: a half fraction and unit spacing."""
+    coords = first + np.arange(n) * spacing
+    return bool(coords[0] % 1 == 0.5 and coords[1] - coords[0] == 1)
+
+
+print("spacing 1, varying the first coordinate")
+for first in (0.0, 0.25, 0.5, 1.5, 3.5, 7.5, -0.5, -2.5):
+    print(f"   first = {first:>5}  -> {'floor' if guard_fires(first) else 'round'}")
+
+print("\nfirst coordinate 3.5, varying the spacing")
+for spacing in (1.0, 0.999999, 0.5, 2.0):
+    print(f"   spacing = {spacing:<9} -> "
+          f"{'floor' if guard_fires(3.5, spacing) else 'round'}")
+```
+
+Both conditions have to hold. The spacing is exactly 1 only on the axis with
+furthest to travel, and a fractional part of `.5` needs a non-integer endpoint.
+Integer endpoints therefore never reach the guard, which can be checked without
+touching the private function at all: if the guard never fires, `line_nd` is
+exactly `np.round` of its own samples.
+
+```{code-cell} ipython3
+def plain_round(start, stop):
+    """What `line_nd` would give if it always used `np.round`."""
+    npoints = int(np.ceil(np.max(np.abs(np.subtract(stop, start))))) + 1
+    samples = np.linspace(start, stop, npoints, endpoint=True).T
+    return [tuple(int(x) for x in c) for c in np.round(samples).astype(int).T]
+
+
+def nd_pixels(start, stop):
+    return [tuple(int(x) for x in c)
+            for c in zip(*line_nd(start, stop, endpoint=True))]
+
+
+distinct = [(a, b) for a, b in all_pairs if a != b]
+same = sum(nd_pixels(a, b) == plain_round(a, b) for a, b in distinct)
+print(f"integer endpoints: line_nd equals plain np.round on "
+      f"{same}/{len(distinct)} pairs  ({same / len(distinct):.1%})")
+```
+
+Where the guard does fire, it earns its place. Starting an axis on a half and
+rounding to even makes `np.round` jump two pixels at a time:
+
+```{code-cell} ipython3
+half_start, half_stop = (0.5, 0.0), (4.5, 2.0)
+print(f"from {half_start} to {half_stop}")
+print(f"   line_nd    {nd_pixels(half_start, half_stop)}")
+print(f"   np.round   {plain_round(half_start, half_stop)}")
+```
+
+The second row steps `0, 2, 2, 4, 4` down the first axis, leaving gaps. That is
+the two-pixel jump the guard exists to prevent.
+
+### The guard only looks one way
+
+The spacing half of the test is `coords[1] - coords[0] == 1`, and that `1` is
+signed. An axis that counts *down* through the same halves is spaced by `-1`,
+so the test fails and the guard says nothing — even though the samples are
+exactly the configuration it was written for.
+
+```{code-cell} ipython3
+ends = ((3.5, 0.0), (0.5, 3.0))
+
+for name, (a, b) in (("named down", ends), ("named up", ends[::-1])):
+    pixels = nd_pixels(a, b)
+    steps = [int(np.max(np.abs(np.subtract(t, s))))
+             for s, t in zip(pixels, pixels[1:])]
+    print(f"{name}:  {a} -> {b}")
+    print(f"   samples on axis 0   {np.linspace(a, b, 4)[:, 0]}")
+    print(f"   line_nd             {pixels}")
+    print(f"   steps between them  {steps}")
+```
+
+One segment, named each way round. Counting up, axis 0 samples
+`0.5, 1.5, 2.5, 3.5`, the guard fires, `np.floor` gives `0, 1, 2, 3`, and the
+line is 8-connected. Counting down it samples the very same four halves in the
+opposite order, the guard stays silent, `np.round` sends them to `4, 2, 2, 0`,
+and the line breaks into three pieces.
+
+```{code-cell} ipython3
+fig, axes = plt.subplots(1, 2, figsize=(6.0, 2.6))
+for ax, (a, b) in zip(axes, (ends, ends[::-1])):
+    pixel_axes(ax, (5, 4), f"{a} to {b}")
+    fill(ax, sk_nd(a, b), C_ND)
+    exact(ax, a, b, color=INK)
+fig.suptitle("line_nd on one segment, named each way round", y=1.02)
+fig.tight_layout()
+```
+
+The left panel is not a tie-breaking quirk that costs a pixel here or there: it
+is a line with two holes in it. It also costs `line_nd` the one symmetry
+section 6 measured it as holding — over integer endpoints the reversal is
+exact, and here it is not.
+
+The case is common rather than rare, because half-integer endpoints are exactly
+what a caller passing floats tends to produce.
+
+```{code-cell} ipython3
+rng = np.random.default_rng(0)
+counts = {"every axis counts up": [0, 0], "some axis counts down": [0, 0]}
+
+for _ in range(10000):
+    a = rng.integers(0, 20, 2) + 0.5
+    b = rng.integers(0, 20, 2) + 0.5
+    if np.array_equal(a, b):
+        continue
+    key = "every axis counts up" if np.all(b >= a) else "some axis counts down"
+    pixels = nd_pixels(a, b)
+    counts[key][0] += any(np.max(np.abs(np.subtract(t, s))) > 1
+                          for s, t in zip(pixels, pixels[1:]))
+    counts[key][1] += 1
+
+print("random half-integer endpoints in a 20x20 box")
+for key, (bad, total) in counts.items():
+    print(f"   {key:<24}{bad:>6} gapped /{total:>6}")
+```
+
+Nothing in the guard is direction-aware except that one comparison. The
+fractional-part half of the test, `coords[0] % 1 == 0.5`, holds whichever way
+the axis runs, and the docstring reasons only in the ascending direction — its
+worked examples are `np.arange(0.5, 8, 1)` and `[0.5, 1.25, 2., 2.75, 3.5]`,
+both counting up. It reads as an oversight rather than a decision. Testing
+`abs(coords[1] - coords[0]) == 1` would close this particular hole; section 10
+argues for removing the need for the guard instead.
+
+So every rounding in the rest of this notebook is plain `np.round`, half-to-even
+and all. `_round_safe` never comes into it, and the tie behaviour of section 4
+is `np.round` alone.
 
 `endpoint` is `False` by default, so the stop point is left out unless asked
 for. Every comparison below passes `endpoint=True` so the point counts match.
@@ -592,6 +847,11 @@ for name, f in (("line", sk_line), ("line_nd", sk_nd)):
 
 Each function holds one property and loses the other.
 
+The `line_nd` column is a statement about `box`, which holds integer endpoints.
+Its reversal symmetry does not survive half-integer ones: the rounding guard of
+section 3 fires on an ascending axis and not on a descending one, so naming the
+ends the other way round can change the pixels, and can open a gap.
+
 +++
 
 ## 7. Pillow and OpenCV
@@ -641,10 +901,13 @@ pixels. Neither of our functions is unusual on this case — each has a peer.
 Across every integer endpoint pair in a 9x9 box:
 
 ```{code-cell} ipython3
-fns = {"sk.line": sk_line, "sk.line_nd": sk_nd, "pillow": pil_line}
-if cv2 is not None:
-    fns["opencv8"] = cv_line
-    fns["opencv4"] = lambda a, b: cv_line(a, b, 4)
+fns = {
+    "sk.line": sk_line,
+    "sk.line_nd": sk_nd,
+    "pillow": pil_line,
+    "opencv8": cv_line,
+    "opencv4": lambda a, b: cv_line(a, b, 4),
+}
 
 drawn = {k: [f(a, b) for a, b in box] for k, f in fns.items()}
 names = list(fns)
@@ -668,6 +931,131 @@ for name, f in fns.items():
         f"{name:<14}{symmetry(f, sample, 'reversal'):>11.1%}"
         f"{symmetry(f, sample, 'translation'):>13.1%}"
     )
+```
+
+### What each library says it does
+
+OpenCV states the algorithm in its own docstring: "For non-antialiased lines
+with integer coordinates, the 8-connected or 4-connected Bresenham algorithm is
+used. ... Antialiased lines are drawn using Gaussian filtering." So both of its
+non-antialiased line types are Bresenham, differing in
+[connectivity](https://en.wikipedia.org/wiki/Pixel_connectivity) rather than in
+method. Pillow's
+[`ImageDraw.line`](https://pillow.readthedocs.io/en/stable/reference/ImageDraw.html)
+documents no algorithm at all.
+
+That leaves the question of how closely the three agree, which is measurable.
+
++++
+
+### The correspondence is exact
+
+Pillow draws the same pixels as `skimage.draw.line`, for the same endpoint
+order. OpenCV draws the same pixels too, but for the endpoints ordered so that
+the **column index decreases** — reversing a Bresenham line moves its
+tie-breaking to the other side, and that reversal is the whole of the
+difference.
+
+```{code-cell} ipython3
+def column_decreasing(a, b):
+    """Order the endpoints so the column index decreases."""
+    return (a, b) if b[1] <= a[1] else (b, a)
+
+
+pillow_same = sum(pil_line(a, b) == sk_line(a, b) for a, b in box)
+opencv_same = sum(cv_line(a, b) == sk_line(*column_decreasing(a, b)) for a, b in box)
+print(f"over {len(box)} endpoint pairs")
+print(f"   pillow  == sk.line, same endpoint order      : {pillow_same / len(box):.1%}")
+print(f"   opencv8 == sk.line, column decreasing        : {opencv_same / len(box):.1%}")
+```
+
+Both are exact. So there is only **one** non-antialiased line algorithm across
+the three libraries; what differs is which end it starts from.
+
+The rule is not obvious from the source, so it is worth showing how it was
+found. Take only the segments where our own line depends on direction, and ask
+which direction OpenCV matched:
+
+```{code-cell} ipython3
+from collections import Counter
+
+pattern = Counter()
+for a, b in box:
+    if sk_line(a, b) == sk_line(b, a):
+        continue                      # direction makes no difference here
+    drawn_by_cv = cv_line(a, b)
+    match = "forward" if drawn_by_cv == sk_line(a, b) else "reversed"
+    d_col = b[1] - a[1]
+    pattern[(match, "column increases" if d_col > 0 else "column decreases")] += 1
+
+for (match, direction), n in sorted(pattern.items()):
+    print(f"   opencv matched our {match:<8} run when the {direction}: {n:>5}")
+```
+
+The split is total: forward exactly when the column decreases. Neither the
+driving axis nor the row direction enters into it.
+
++++
+
+### Anti-aliasing: the one place they genuinely differ
+
+Every comparison so far has been between hard-edged lines. Softening the edges
+is a separate algorithm, and here the three libraries part company.
+
+`skimage.draw.line_aa` implements the method of
+[Zingl (2012)](http://members.chello.at/easyfilter/Bresenham.pdf), an extension
+of Bresenham that carries the error term into a coverage value. OpenCV's
+`LINE_AA` uses Gaussian filtering, by its own description. Pillow's `ImageDraw`
+has no anti-aliased line at all: it draws in two levels, and the usual advice
+is to draw large and downsample.
+
+```{code-cell} ipython3
+from skimage.draw import line_aa
+
+AA = 16
+aa_start, aa_stop = (3, 2), (9, 13)
+
+pillow_image = Image.new("L", (AA, AA), 0)
+ImageDraw.Draw(pillow_image).line(
+    [(aa_start[1], aa_start[0]), (aa_stop[1], aa_stop[0])], fill=255, width=1
+)
+pillow_aa = np.array(pillow_image) / 255
+
+opencv_aa = np.zeros((AA, AA), np.uint8)
+cv2.line(opencv_aa, (aa_start[1], aa_start[0]), (aa_stop[1], aa_stop[0]),
+         255, 1, lineType=cv2.LINE_AA)
+opencv_aa = opencv_aa / 255
+
+skimage_aa = np.zeros((AA, AA))
+rr, cc, value = line_aa(aa_start[0], aa_start[1], aa_stop[0], aa_stop[1])
+skimage_aa[rr, cc] = value
+
+for name, img in (("skimage line_aa", skimage_aa), ("opencv LINE_AA", opencv_aa),
+                  ("pillow", pillow_aa)):
+    print(f"{name:<18}{len(np.unique(img)):>3} distinct levels,"
+          f"{int((img > 0).sum()):>4} pixels touched")
+```
+
+Pillow reports two levels because it is not anti-aliasing at all. OpenCV
+touches far more pixels than `line_aa`, which is what a Gaussian does: it
+spreads coverage over a wider skirt than an error-term method.
+
+```{code-cell} ipython3
+fig, axes = plt.subplots(1, 3, figsize=(9.0, 2.8))
+for ax, (name, img) in zip(axes, (("skimage line_aa", skimage_aa),
+                                  ("opencv LINE_AA", opencv_aa),
+                                  ("pillow, no anti-aliasing", pillow_aa))):
+    ax.imshow(img, cmap=LinearSegmentedColormap.from_list("c", [C_OFF, C_LINE]),
+              vmin=0, vmax=1, interpolation="nearest")
+    ax.plot([aa_start[1], aa_stop[1]], [aa_start[0], aa_stop[0]],
+            color=INK, linewidth=1.0)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_title(name)
+fig.suptitle("coverage, not just which pixels", y=1.04)
+fig.tight_layout()
 ```
 
 Two things fall out of those numbers.
@@ -699,8 +1087,6 @@ C_FOUR = "#1baf7a"
 S4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]])
 S8 = np.ones((3, 3), int)
 ```
-
-+++
 
 ### What each one guarantees
 
@@ -741,11 +1127,34 @@ The difference is visible in the moves themselves. Walk each pixel set along
 the driving axis and look at the step taken between consecutive pixels:
 
 ```{code-cell} ipython3
+def path_order(pixels, start, stop):
+    """The pixels in the order the line visits them, major axis first."""
+    delta = np.abs(np.subtract(stop, start))
+    major = int(np.argmax(delta))
+    minor = 1 - major
+    sign = np.sign(np.subtract(stop, start))
+    return sorted(pixels,
+                  key=lambda ij: (sign[major] * ij[major], sign[minor] * ij[minor]))
+
+
+def steps_taken(pixels, start, stop):
+    """The distinct moves between consecutive pixels along the path."""
+    walk = path_order(pixels, start, stop)
+    return sorted({(abs(u[0] - v[0]), abs(u[1] - v[1]))
+                   for u, v in zip(walk, walk[1:])})
+
+
 for conn in (8, 4):
-    pix = sorted(cv_line(a, b, conn), key=lambda ij: ij[1])
-    steps = sorted({(abs(p[0] - q[0]), abs(p[1] - q[1]))
-                    for p, q in zip(pix, pix[1:])})
-    print(f"LINE_{conn}: {len(pix):>3} pixels, steps {steps}")
+    pix = cv_line(a, b, conn)
+    print(f"LINE_{conn}: {len(pix):>3} pixels, steps {steps_taken(pix, a, b)}")
+```
+
+One segment proves nothing, so check the whole corpus: no 4-connected line may
+contain a diagonal move.
+
+```{code-cell} ipython3
+diagonal_in_4 = sum((1, 1) in steps_taken(cv_line(u, v, 4), u, v) for u, v in box)
+print(f"LINE_4 lines containing a (1, 1) move, out of {len(box)}: {diagonal_in_4}")
 ```
 
 `(1, 1)` is a diagonal move. Only the 8-connected line makes one; the
@@ -942,15 +1351,375 @@ fig.suptitle("same guarantees, different corners", y=1.04)
 fig.tight_layout()
 ```
 
-## 9. Two ways forward
+## 9. Bresenham in N dimensions, and what to call things
+
+Bresenham is not a 2-D algorithm that happens to be popular. Wikipedia defines
+it as determining "the points of an **n-dimensional** raster", and the 2-D case
+is the one everybody meets first. So the split in this notebook — Bresenham for
+two axes, a sampled line for N — is a fact about scikit-image, not about the
+algorithms.
+
++++
+
+### The generalisation
+
+The 2-D version of section 2 carries one error accumulator. The N-D version
+carries one per **minor** axis, and tests each independently. Nothing else
+changes.
+
+```{code-cell} ipython3
+def bresenham_nd(start, stop):
+    """Bresenham in any number of dimensions: one error term per minor axis."""
+    start, stop = np.array(start), np.array(stop)
+    delta = np.abs(stop - start)
+    step = np.sign(stop - start)
+
+    major = int(np.argmax(delta))
+    n_steps = int(delta[major])
+    error = 2 * delta - n_steps          # one accumulator per axis
+
+    at = start.copy()
+    out = []
+    for _ in range(n_steps):
+        out.append(tuple(int(x) for x in at))
+        for axis in range(len(delta)):
+            if axis == major:
+                continue
+            if error[axis] >= 0:
+                at[axis] += step[axis]
+                error[axis] -= 2 * n_steps
+            error[axis] += 2 * delta[axis]
+        at[major] += step[major]
+
+    out.append(tuple(int(x) for x in stop))
+    return out
+```
+
+It has to reduce to the existing function when given two axes, or it is a
+different algorithm wearing the same name.
+
+```{code-cell} ipython3
+matches = sum(bresenham_nd(a, b) == sk_sequence(a, b) for a, b in all_pairs)
+print(f"identical to skimage.draw.line in 2-D on {matches}/{len(all_pairs)} pairs"
+      f"  ({matches / len(all_pairs):.1%})")
+```
+
+### What it does in three dimensions
+
+```{code-cell} ipython3
+def nd_sequence(start, stop):
+    """`line_nd` as a list of integer tuples, endpoint included."""
+    return [tuple(int(x) for x in c)
+            for c in zip(*line_nd(start, stop, endpoint=True))]
+
+
+rng = np.random.default_rng(0)
+grid = list(itertools.product(range(-4, 5), repeat=3))
+choice = rng.choice(len(grid), size=(1500, 2))
+triples = [(grid[a], grid[b]) for a, b in choice if grid[a] != grid[b]]
+
+chebyshev = connected = 0
+for start, stop in triples:
+    pix = bresenham_nd(start, stop)
+    chebyshev += len(pix) == max(abs(np.subtract(stop, start))) + 1
+    connected += all(max(abs(np.subtract(v, u))) <= 1
+                     for u, v in zip(pix, pix[1:]))
+
+agree = sum(bresenham_nd(a, b) == nd_sequence(a, b) for a, b in triples)
+print(f"over {len(triples)} random 3-D segments")
+print(f"   point count is max(abs(delta)) + 1   : {chebyshev / len(triples):.1%}")
+print(f"   every step moves at most 1 per axis  : {connected / len(triples):.1%}")
+print(f"   identical to line_nd                 : {agree / len(triples):.1%}")
+```
+
+The point count is the Chebyshev length again, and a step of at most one per
+axis means the line is 26-connected in 3-D — the direct generalisation of the
+diagonal connectivity of section 8.
+
+The symmetries carry over unchanged, which is the useful part: the two
+algorithms hold the same complementary pair of properties in 3-D that they held
+in 2-D.
+
+```{code-cell} ipython3
+def holds(fn, kind, cases):
+    ok = 0
+    for start, stop in cases:
+        if kind == "reversal":
+            ok += set(fn(start, stop)) == set(fn(stop, start))
+        else:
+            shift = np.array([3, 1, 2])
+            moved = {tuple(np.add(c, shift)) for c in fn(start, stop)}
+            ok += moved == set(fn(tuple(np.add(start, shift)),
+                                  tuple(np.add(stop, shift))))
+    return ok / len(cases)
+
+
+sample = triples[:600]
+print(f"{'':16}{'reversal':>11}{'translation':>14}")
+for name, fn in (("bresenham_nd", bresenham_nd), ("line_nd", nd_sequence)):
+    print(f"{name:<16}{holds(fn, 'reversal', sample):>10.1%}"
+          f"{holds(fn, 'translation', sample):>14.1%}")
+```
+
+A 3-D scatter is hard to read, so project the line onto the two planes that
+contain the major axis. The staircases are then as legible as in section 4.
+Projection can send two different 3-D positions to one cell, so the grey shows
+agreement *in the projection*; the exact disagreements are listed below it.
+
+```{code-cell} ipython3
+# All three axes vary, and the two algorithms disagree on part of the run.
+start3, stop3 = (0, 0, 0), (2, 4, 8)
+walks = {"bresenham_nd": bresenham_nd(start3, stop3),
+         "line_nd": nd_sequence(start3, stop3)}
+
+fig, axes = plt.subplots(2, 2, figsize=(8.4, 4.0))
+for row, (name, walk) in enumerate(walks.items()):
+    colour = C_LINE if name == "bresenham_nd" else C_ND
+    for col, axis in enumerate((0, 1)):
+        ax = axes[row, col]
+        shared = {(v[axis], v[2]) for v in walks["bresenham_nd"]} & \
+                 {(v[axis], v[2]) for v in walks["line_nd"]}
+        mine = {(v[axis], v[2]) for v in walk}
+        pixel_axes(ax, (5 if axis else 3, 9),
+                   f"{name}, axis {axis} against axis 2")
+        fill(ax, shared, C_BOTH)
+        fill(ax, mine - shared, colour)
+        exact(ax, (start3[axis], start3[2]), (stop3[axis], stop3[2]),
+              color="white")
+fig.suptitle("grey where the projections coincide, coloured where they do not", y=1.02)
+fig.tight_layout()
+```
+
+```{code-cell} ipython3
+differ = [(u, v) for u, v in zip(walks["bresenham_nd"], walks["line_nd"]) if u != v]
+print(f"{len(differ)} of {len(walks['bresenham_nd'])} positions differ:")
+for u, v in differ:
+    print(f"   bresenham_nd {u}   line_nd {v}")
+```
+
+### Elsewhere
+
+[ITK's `BresenhamLine`](https://examples.itk.org/src/core/common/bresenhamline/documentation)
+is templated over dimension, and is the closest thing to a reference N-D
+implementation in an imaging library. Rust's
+[`line_drawing`](https://docs.rs/line_drawing/latest/line_drawing/struct.Bresenham3d.html)
+crate exposes `Bresenham3d` alongside `XiaolinWu` and `Supercover`, naming each
+by its algorithm. OpenCV and Pillow are 2-D only.
+
+One warning about the literature: "3-D Bresenham" names **two** different
+things. Some implementations use integer error terms, as above. Others set
+`step = delta / max(delta)` and accumulate in floating point, which is a
+digital differential analyser with Bresenham's name attached — and that is what
+`line_nd` is.
+
++++
+
+### The naming is the problem
+
+`skimage.draw` has three line functions, and they are distinguished along three
+different axes:
+
+| Name | What the suffix means |
+| --- | --- |
+| `line` | nothing; it is the default |
+| `line_aa` | a **property** of the output: anti-aliased |
+| `line_nd` | a **dimensionality** |
+
+None of them names an algorithm, and the one that looks like a dimensionality
+claim is really an algorithm claim: `line_nd` differs from `line` in 2-D as
+well, on about a fifth of segments, as section 5 measured.
+
+Decision D1 of the port makes this sharper. Once `line` takes coordinate
+tuples, `line(start, stop)` and `line_nd(start, stop)` have **identical
+signatures**. If `line` also became N-D, the two would be interchangeable at
+every call site while returning different pixels for a third of 3-D segments.
+
++++
+
+### What actually separates them
+
+Not the dimensionality, and for a user not really the algorithm either, but the
+guarantees:
+
+| | `line` (Bresenham) | `line_nd` (sampled) |
+| --- | --- | --- |
+| Endpoints | integers only | floats accepted |
+| Endpoint included | always | `endpoint=` |
+| Output | integer indices | integers, or floats with `integer=False` |
+| Arithmetic | exact integer | floating point |
+| Translation invariant | **yes** | no |
+| Reversal symmetric | no | **yes** |
+
+The float endpoints are not a convenience that Bresenham could absorb. Integer
+arithmetic needs integer deltas, so a float segment has to be rounded first,
+and that is a different line:
+
+```{code-cell} ipython3
+print("line_nd on the true float segment:")
+print("  ", nd_sequence((0.4, 0.2), (3.6, 9.8)))
+print("bresenham on the rounded endpoints:")
+print("  ", bresenham_nd((0, 0), (4, 10)))
+```
+
+### Refactoring options
+
+Each of these is a real choice, and none is free.
+
+**A. Extend `line` to N-D, leave `line_nd` alone.**
+*For:* the smallest change; Bresenham becomes available in 3-D where ITK users
+already expect it.
+*Against:* the names then actively mislead. `line_nd` would no longer be the
+N-D one, and nothing in either name would say which algorithm you get. This is
+the worst option for a reader coming to the API fresh.
+
+**B. One function with a `method=` keyword.**
+`line(start, stop, method="bresenham")` or `method="dda"`.
+*For:* one entry point; the choice is visible at the call site; new methods
+(supercover, 4-connected) slot in later.
+*Against:* the methods do not accept the same arguments. `endpoint` and float
+coordinates are meaningless for Bresenham, so the signature grows parameters
+that are valid only for some values of `method` — the pattern that made
+`warp`'s `inverse_map` hard to document.
+
+**C. Rename `line_nd` to `line_dda`, and extend `line` to N-D.**
+*For:* both names then say what they are, and the dimensionality stops being
+part of anybody's name because both work in N-D. The distinction on offer is
+the real one.
+*Against:* `dda` is jargon; a user who does not know the term learns nothing
+from it. It also breaks every existing `line_nd` call.
+
+**D. One N-D Bresenham, drop the sampled version.**
+*For:* one line function, one set of guarantees, no choice to explain.
+*Against:* it deletes float endpoints, `endpoint=False` and `integer=False`,
+which the cell above shows cannot be recovered by rounding. Multi-point path
+drawing depends on `endpoint=False`. Not viable as it stands.
+
+**E. Name by the guarantee, not the algorithm.**
+Something like `line` for the exact-integer one and `line_sampled` for the
+other.
+*For:* names the thing the user chooses on. A caller who needs float endpoints
+reads "sampled" and knows; "dda" tells them nothing.
+*Against:* invents vocabulary that no other library uses, so it helps nobody
+arriving from ITK or the graphics literature.
+
+**F. Leave the names, document the difference.**
+*For:* no breakage; the cost is one paragraph in each docstring and a
+`See Also`.
+*Against:* leaves two functions with identical signatures and different results
+distinguished by a suffix that describes neither difference. Section 5 shows
+people would have to read carefully to find out which they want.
+
+**A recommendation, with the caveat that it is a judgement and not a
+measurement.** C, with E's reasoning applied to the docstrings: extend `line`
+to N dimensions, rename `line_nd` to `line_dda`, keep `line_nd` as a
+deprecated alias, and open each docstring with the guarantee rather than the
+algorithm — "exact integer arithmetic, integer endpoints" against "samples the
+segment, accepts float endpoints". That gives honest names for the people who
+know the algorithms, and a first sentence that decides it for the people who do
+not.
+
+Option B is the tempting one and worth resisting for the reason `warp` teaches:
+a keyword that changes which other keywords are legal is a worse interface than
+two functions.
+
++++
+
+## 10. Two ways forward
 
 +++
 
 ### Fix 1: round half up in `line_nd`
 
 Half-to-even makes the drawn shape depend on the parity of an absolute
-coordinate. Nothing wants that, and `_round_safe` is itself an admission that
-the rule misbehaves — it patches one case instead of replacing the rule.
+coordinate. Nothing wants that.
+
+`_round_safe` is not a partial fix for that, and it is worth being precise
+about what it is. Half-to-even has **two** distinct consequences, and the guard
+addresses one of them completely while leaving the other alone.
+
+The first is a **gap**. `line_nd` samples at most one pixel apart, so rounding
+must not put two consecutive samples two pixels apart. Half-to-even can:
+`np.round([0.5, 1.5])` is `[0, 2]`. The guard aims at exactly that, and on an
+ascending axis it hits: a gap needs two consecutive samples on exact halves,
+which needs a half fraction and unit spacing, which is what the guard tests.
+On a descending axis it misses, for the signed-`1` reason section 3 sets out,
+and the line comes apart.
+
+The second is the **parity dependence** itself: at a tie, which way the rounding
+goes depends on whether the neighbouring integer is even, so the drawn shape
+depends on where the line sits rather than on its direction. That produces no
+gap, so the guard never sees it.
+
+Rounding half up removes both at once, and in both directions, which is why
+the guard becomes unnecessary rather than merely redundant. That it cannot gap is provable, not
+just observed.
+
+Write `f(x) = floor(x + 1/2)`. Two facts bound its error:
+
+- `f(x) <= x + 1/2`, since `floor(y) <= y`. Equality holds exactly when
+  `x + 1/2` is whole, that is when `x` lies on a half.
+- `f(x) > x - 1/2`, since `floor(y) > y - 1`. This one is **strict**.
+
+So the rounding error `f(x) - x` lies in the half-open interval
+`(-1/2, +1/2]`. It reaches `+1/2`, and approaches `-1/2` without ever
+attaining it.
+
+Now take two samples no more than one apart, with the second the larger.
+Applying the upper bound to one term and the strict lower bound to the other:
+
+```
+    f(x[k+1]) - f(x[k])  <  (x[k+1] + 1/2) - (x[k] - 1/2)
+                         =  (x[k+1] - x[k]) + 1  <=  2
+```
+
+The left side is an integer strictly less than 2, so it is at most 1, and `f`
+is non-decreasing so it is at least 0. Reversing the roles covers the other
+direction. Hence
+
+```
+    | f(x[k+1]) - f(x[k]) |  <=  1
+```
+
+for any two samples at most one apart. No gap is possible — for any offset, any
+spacing, and without needing the samples to be equidistant, so the proof is
+slightly stronger than the assumption `_round_safe` documents.
+
+**Where the argument fails for the other rules.** Everything turns on that one
+strict inequality. `np.round` attains **both** ends of `[-1/2, +1/2]`: its error
+is `-1/2` at `0.5` and `+1/2` at `1.5`. With equalities on both sides the bound
+becomes exactly 2, and 2 is then reachable — `np.round([0.5, 1.5])` is `[0, 2]`.
+
+That makes it a statement about half-openness rather than about banker's
+rounding in particular, which is a falsifiable prediction: rounding halves away
+from zero also attains both ends, at `-0.5` and `+0.5`, so it should gap too —
+at the origin, where those two meet.
+
+```{code-cell} ipython3
+rules = {
+    "half-up": lambda x: np.floor(x + 0.5),
+    "half-to-even": np.round,
+    "half-away": lambda x: np.sign(x) * np.floor(np.abs(x) + 0.5),
+}
+
+fine = np.arange(-4, 4, 1 / 512)
+print(f"{'rule':<14}{'error range':>22}{'worst jump, step 1':>22}")
+for name, rule in rules.items():
+    errors = rule(fine) - fine
+    steps = np.arange(-4, 4, 0.25)
+    jump = max(abs(float(rule(np.float64(a + 1.0)) - rule(np.float64(a))))
+               for a in steps)
+    print(f"{name:<14}[{errors.min():+.3f}, {errors.max():+.3f}]{jump:>21.0f}")
+```
+
+Half-up never produces a negative error at all on a grid of halves, and its
+minimum over a fine grid approaches `-1/2` without reaching it. The other two
+touch both ends, and both gap.
+
+So the guard addresses the gap alone, and only on axes that count up. A
+one-word repair — `abs(coords[1] - coords[0]) == 1` — would finish that job,
+and would still leave the exact float equalities, the inspect-only-the-first-
+coordinate assumption, and the parity dependence in place. Fix 1 retires all
+four together.
 
 Rounding half up is translation-invariant by construction, because
 `floor(x + t + 0.5) == floor(x + 0.5) + t` for whole `t`.
@@ -1041,7 +1810,7 @@ in a patch release.
 
 +++
 
-## 10. What not to do
+## 11. What not to do
 
 Do not try to make `line` and `line_nd` agree. Even with both fixes they still
 differ on a small fraction of segments, and that residue is inherent: an exact
@@ -1076,10 +1845,18 @@ fig.tight_layout()
 | Input | integer only | float or integer | integer | integer (sub-pixel via `shift`) |
 | Stop point | always included | excluded unless `endpoint=True` | included | included |
 | Connectivity | diagonal | diagonal | diagonal | diagonal or 4-connected |
-| Reversal symmetric | no | **yes** | no | **yes** |
+| Reversal symmetric | no | **yes**, for integer endpoints | no | **yes** |
 | Translation invariant | **yes** | no | **yes** | **yes** |
 
+One non-antialiased algorithm underlies all three libraries. `skimage.draw.line`
+and Pillow agree pixel for pixel; OpenCV agrees too, for the endpoints ordered
+so the column decreases. The differences in the table are tie-breaking and
+endpoint order, not method.
+
+Anti-aliasing is where they actually diverge, and section 7 measures that:
+`line_aa` follows Zingl, OpenCV filters with a Gaussian and touches a wider
+skirt, and Pillow does not anti-alias lines at all.
+
 Measured with Pillow 12.2.0 and OpenCV 5.0.0, over integer endpoints only, for
-segments up to about twelve pixels long. Anti-aliased variants
-(`line_aa`, Pillow's, OpenCV's `LINE_AA`) are not compared here; `line_aa`
-would want the same endpoint treatment as `line`.
+segments up to about twelve pixels long. `line_aa` is compared only for
+coverage, not for the endpoint treatment it would want alongside `line`.

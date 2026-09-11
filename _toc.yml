@@ -6,5 +6,6 @@ root: index
 chapters:
   - file: on_lines
   - file: on_hessian
+  - file: on_blob_dog
   - file: on_warp_maps
   - file: rotate_description
