@@ -6,6 +6,7 @@ ipykernel
 numpy
 scipy
 scikit-image
+scikit-image@git+https://github.com/scikit-image/scikit-image@main
 matplotlib
 opencv-python-headless
 pillow

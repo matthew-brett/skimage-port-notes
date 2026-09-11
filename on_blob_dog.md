@@ -596,7 +596,13 @@ it shrinks when the caller asks for it to, and it matches what SIFT does.
 
 **`blob_log`.** Nothing. It is the accurate detector of the three.
 
-**`blob_doh`.** Three separate things, worth separating.
+**`blob_doh`.** Four separate things, worth separating.
+
+The **one-pixel position offset** is the clearest defect and the cheapest to
+fix. Every blob is reported one pixel up and left because the box filters cannot
+straddle the centre pixel at even widths. It is a constant, it affects every
+call, and it has nothing to do with the approximation the function is allowed to
+make. This one is worth an upstream issue on its own.
 
 The **scale bias** of `+5%` to `+33%` is a calibration question. `size =
 int(3 * sigma)` ties the filter width to `sigma` by a constant that does not
