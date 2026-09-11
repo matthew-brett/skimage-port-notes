@@ -25,10 +25,35 @@ jobs:
           cache: pip
           cache-dependency-path: build_requirements.txt
 
+      - name: Resolve scikit-image revision
+        id: skimage
+        run: |
+          sha=$(git ls-remote https://github.com/scikit-image/scikit-image.git refs/heads/main | cut -f1)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # Keyed by upstream SHA so a requirements.txt change does not force a rebuild.
+      - name: Cache scikit-image wheel
+        id: skimage-wheel
+        uses: actions/cache@v6
+        with:
+          path: .skimage-wheels
+          key: skimage-wheel-${{ runner.os }}-cp312-${{ steps.skimage.outputs.sha }}
+
+      - name: Build scikit-image wheel
+        if: steps.skimage-wheel.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .skimage-wheels
+          python -m pip install --upgrade pip
+          python -m pip wheel --no-deps -w .skimage-wheels \
+            "scikit-image @ git+https://github.com/scikit-image/scikit-image@${{ steps.skimage.outputs.sha }}"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r build_requirements.txt
+          python -m pip install .skimage-wheels/scikit_image-*.whl
+          # Install the rest without the VCS line (would rebuild from source).
+          grep -vE '^(#|$|scikit-image@git)' build_requirements.txt \
+            | python -m pip install -r /dev/stdin
 
       - name: Build the book
         # -W turns Sphinx warnings into errors; the notebooks must also run.
