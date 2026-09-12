@@ -348,8 +348,12 @@ is assumed to be the last.  We agreed on Zulip and meeting that we should always
 
 * `set_color` in `draw/draw.py` (`image : ndarray of shape (M, N,
   C)`)
-* `profile_line` and `show_rag` in `graph/_rag.py`.
-* `rag_mean_color` and `show_rag` in `graph/_rag.py`.
+* `profile_line` in `measure/profile.py` (docstring: "multichannel (3D array,
+  where the final axis contains the channel information)"; the assumption is
+  the `if image.ndim == 3:` branch).
+* `show_rag` in `graph/_rag.py` (`image : ndarray, shape (M, N[, 3])`).
+* `rag_mean_color` in `graph/_rag.py`
+  (`image : ndarray, shape(M, N[, ..., P], 3)`).
 * `quickshift` in `segmentation/_quickshift.py`
 * `active_contour` in `segmentation/active_contour_model.py`.
 * `mark_boundaries` in `segmentation/boundaries.py`.
@@ -396,7 +400,7 @@ Other examples of the one-argument-for-both pattern:
 
   ```
   - skimage.measure.profile_line(image, src, dst, ...): Uses src and dst as coordinate pairs.
-  - skimage.segmentation.flood(image, seed_point, ...): Uses a seed_point tuple.
+  - skimage.morphology.flood(image, seed_point, ...): Uses a seed_point tuple.
   ```
 
 For an example of the first (separate argument) pattern, see the docstring of
