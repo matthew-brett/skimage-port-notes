@@ -305,8 +305,87 @@ symmetric blob peaks when `(r, c)` is one pixel up and left of the true centre.
 
 The half-pixel even-`size` term is real, but it is not what produces the
 constant `(-1, -1)` on discs: that offset appears at odd `size` too. Correcting
-the integral indexing, with the image padded so clamping cannot interfere,
-moves odd-`size` peaks onto the centre.
+the integral indexing shifts every box back by one pixel, and that is necessary.
+It is not sufficient, and the reason is the same parity argument applied to the
+other box.
+
+`mid` runs `size` columns from `c - s2` with `s2 = (size - 1) // 2`, so it
+straddles the centre pixel only when `size` is odd. `side` runs `s3` columns
+from `c - s3 // 2`, so it straddles the centre only when **`s3` is odd**. Both
+have to hold. The test is whether the response is symmetric about a symmetric
+blob's true centre — the peak position of a flat response is arbitrary, its
+symmetry is not.
+
+```{code-cell} ipython3
+def det_variants(image, sigma, shifted):
+    """`_hessian_matrix_det`, vectorised, with the `_integ` shift switchable."""
+    size = int(3 * sigma)
+    s2, s3, w = (size - 1) // 2, size // 3, size
+    w_i = 1.0 / size / size
+    n_rows, n_cols = image.shape
+    table = np.zeros((n_rows + 1, n_cols + 1))
+    table[1:, 1:] = image.cumsum(0).cumsum(1)
+    off = 1 if shifted else 0            # `_integ` sums one pixel down and right
+
+    def box(r, c, rl, cl):
+        r0, c0 = np.clip(r + off, 0, n_rows), np.clip(c + off, 0, n_cols)
+        r1, c1 = np.clip(r + off + rl, 0, n_rows), np.clip(c + off + cl, 0, n_cols)
+        return np.maximum(0.0, table[r1, c1] + table[r0, c0]
+                          - table[r0, c1] - table[r1, c0])
+
+    rr, cc = np.indices(image.shape)
+    dxy = -(box(rr - s3, cc + 1, s3, s3) + box(rr + 1, cc - s3, s3, s3)
+            - box(rr - s3, cc - s3, s3, s3) - box(rr + 1, cc + 1, s3, s3)) * w_i
+    dxx = -(box(rr - s3 + 1, cc - s2, 2 * s3 - 1, w)
+            - 3 * box(rr - s3 + 1, cc - s3 // 2, 2 * s3 - 1, s3)) * w_i
+    dyy = -(box(rr - s2, cc - s3 + 1, w, 2 * s3 - 1)
+            - 3 * box(rr - s3 // 2, cc - s3 + 1, s3, 2 * s3 - 1)) * w_i
+    return dxx * dyy - 0.81 * (dxy * dxy)
+```
+
+```{code-cell} ipython3
+# The reimplementation is exact against the shipped routine in the interior,
+# which is what licenses using it to reason about the shipped one.
+probe_img = ski.util.img_as_float(ski.data.camera())[::4, ::4]
+inner = (slice(30, -30),) * 2
+worst = max(
+    np.abs(hessian_matrix_det(probe_img, sigma=s, approximate=True)[inner]
+           - det_variants(probe_img, s, shifted=True)[inner]).max()
+    for s in (2.0, 3.0, 4.0)
+)
+print(f"vectorised reimplementation vs shipped, interior: max |difference| {worst:.1e}")
+```
+
+```{code-cell} ipython3
+SYM_N = 121
+sym_centre = SYM_N // 2
+sy, sx = np.indices((SYM_N, SYM_N))
+sym_blob = np.exp(-((sy - sym_centre) ** 2 + (sx - sym_centre) ** 2) / (2 * 6.0**2))
+SYM_PAD = 90
+sym_padded = np.pad(sym_blob, SYM_PAD)
+
+
+def asymmetry(sigma, shifted):
+    """Departure from symmetry about the blob's true centre, padded so no clamping."""
+    resp = det_variants(sym_padded, sigma, shifted)[SYM_PAD:-SYM_PAD, SYM_PAD:-SYM_PAD]
+    return np.abs(resp - resp[::-1, ::-1]).max() / max(np.abs(resp).max(), 1e-30)
+
+
+print(f"{'size':>5}{'s3':>5}{'size odd':>10}{'s3 odd':>8}"
+      f"{'as shipped':>13}{'indexing fixed':>16}")
+for size in range(3, 25):
+    sigma = size / 3.0                      # so that int(3 * sigma) == size
+    s3 = size // 3
+    print(f"{size:>5}{s3:>5}{('yes' if size % 2 else 'no'):>10}"
+          f"{('yes' if s3 % 2 else 'no'):>8}"
+          f"{asymmetry(sigma, True):>12.1%}{asymmetry(sigma, False):>16.1%}")
+```
+
+Fixing the indexing gives an exactly symmetric operator at every `size` where
+both `size` and `s3` are odd, and leaves 35% to 77% asymmetry at `size` 7, 13
+and 19 — the odd sizes whose `s3` is even. So the centring defect is two
+separate parity conditions on top of the indexing shift, and a fix that
+addresses only the indexing still mis-centres a third of the odd scales.
 
 ```{code-cell} ipython3
 DETECTORS = {"blob_dog": lambda im: blob_dog(im, min_sigma=2, max_sigma=30,
@@ -540,8 +619,27 @@ box route is not. The rest of this section diagnoses why, and what a fix costs.
 
 Every box sum goes through `_integ`, which clips each corner of the requested
 rectangle to the image and then applies the four-corner integral formula. There
-is no `mode`, and no pad. A rectangle that sticks out is not extended: it is
-**shrunk** until it fits.
+is no `mode`, and no pad. A rectangle that sticks out is never extended — but
+what happens to it instead depends on *which* edge it crosses, and the two
+outcomes are different failures.
+
+`_integ` clips the origin first and only then adds the extent:
+
+```
+r  = clip(r,      0, rows - 1)
+r2 = clip(r + rl, 0, rows - 1)
+```
+
+Because `r + rl` is measured from the **already clipped** `r`, a box hanging
+off the **top or left** keeps its full size and is **slid** inward. A box
+hanging off the **bottom or right** has nowhere to slide, so `r2` clips and it
+is **shrunk**.
+
+Both are wrong, and they are wrong in different ways. The slid box computes a
+correctly normalised derivative *of the wrong neighbourhood*, displaced toward
+the interior. The shrunk box computes over fewer taps than the `(1, -2, 1)`
+balance assumes, while still dividing by `size ** 2` as though the full box were
+present — so its normalisation no longer matches the area actually summed.
 
 ```{code-cell} ipython3
 def pad_needed(sigma):
@@ -555,31 +653,38 @@ def pad_needed(sigma):
     return size - (size - 1) // 2
 
 
-def requested_vs_clamped(r, c, rl, cl, shape):
-    """What `_integ` asks for, and what clamping leaves behind."""
-    h, w = shape
+def clamped_box(r, c, rl, cl, shape):
+    """Origin and extent `_integ` actually integrates over, given a request."""
+    rows, cols = shape
 
     def clip(x, lo, hi):
         return hi if x > hi else (lo if x < lo else x)
 
-    r0, c0 = clip(r, 0, h - 1), clip(c, 0, w - 1)
-    r1, c1 = clip(r0 + rl, 0, h - 1), clip(c0 + cl, 0, w - 1)
-    return (rl, cl), (r1 - r0, c1 - c0)
+    r0, c0 = clip(r, 0, rows - 1), clip(c, 0, cols - 1)
+    # `_integ` measures the extent from the clipped origin, not the requested one.
+    r1, c1 = clip(r0 + rl, 0, rows - 1), clip(c0 + cl, 0, cols - 1)
+    return (r0, c0), (r1 - r0, c1 - c0)
 
 
 sigma = 4.0
 size = int(3 * sigma)
 s2, s3 = (size - 1) // 2, size // 3
-# The dyy mid box at the top-left corner: `_integ(img, r - s2, c - s3 + 1, w, 2*s3 - 1)`.
-ask, got = requested_vs_clamped(0 - s2, 0 - s3 + 1, size, 2 * s3 - 1, photo.shape)
+asked = (size, 2 * s3 - 1)
 print(f"sigma = {sigma}, size = {size}, pad_needed = {pad_needed(sigma)}")
-print(f"dyy mid at (0, 0): requested {ask}, after clamp {got}")
+print(f"the dyy mid box asks for {asked[0]} x {asked[1]}\n")
+
+rows, cols = photo.shape
+for label, (r, c) in (("top-left     (0, 0)", (0, 0)),
+                      (f"bottom-right ({rows - 1}, {cols - 1})", (rows - 1, cols - 1))):
+    origin, extent = clamped_box(r - s2, c - s3 + 1, size, 2 * s3 - 1, photo.shape)
+    verdict = "slid, full size" if extent == asked else "shrunk"
+    print(f"   {label}: origin {origin}, extent {extent}  -> {verdict}")
 ```
 
-The weights still divide by `size ** 2`, as if the full box were present. Near an
-edge the operator is therefore a different filter: fewer taps, the wrong
-`(1, -2, 1)` balance, and a normalisation that no longer matches the area
-actually summed.
+The same box, the same distance outside the image, and two different outcomes.
+Only the bottom-right one loses taps; the top-left one keeps all of them and
+looks somewhere else instead. Neither is the filter the caller asked for, and
+neither is what any `mode` would give.
 
 ### The defect is a band, not a haze
 
@@ -765,38 +870,60 @@ it shrinks when the caller asks for it to, and it matches what SIFT does.
 
 **`blob_log`.** Nothing. It is the accurate detector of the three.
 
-**`blob_doh`.** Four separate things, worth separating.
+**`blob_doh`.** Four defects, and they are genuinely independent: each has its
+own cause, its own patch, and its own blast radius. Fixing one does not disturb
+another, so they can go in separately and in any order.
 
-The **one-pixel position offset** is the clearest defect and the cheapest to
-fix. Every blob is reported one pixel up and left because `_integ` applies an
-OpenCV-style four-corner formula to skimage's same-shape integral image, so
-every box sits one pixel down and right of the centre it names. The even-`size`
-half-pixel term of section 5 is a second, smaller centring error; the dead
-`size += 1` line does not remove it. The constant offset affects every call and
-has nothing to do with the approximation the function is allowed to make. This
-one is worth an upstream issue on its own.
+| # | defect | cause | fix | changes output |
+| --- | --- | --- | --- | --- |
+| D1 | every blob reported one pixel up and left | `_integ`'s four-corner formula assumes a zero-padded `(H+1, W+1)` table; skimage's integral image is same-shape, so each box sums one pixel down and right of the corner it names | index the integral image correctly, or build a zero-padded one | positions move by one pixel, everywhere |
+| D2 | boxes still off-centre at some scales | `mid` needs `size` odd, `side` needs `s3 = size // 3` odd; the `size += 1` line meant to fix this is dead, and neither condition is enforced | choose `size` so both are odd | responses change at the affected scales |
+| D3 | reported radius `+5%` to `+33%` | `size = int(3 * sigma)` does not reproduce SURF's own filter-size-to-scale relation | recalibrate the constant | reported radii shrink |
+| D4 | border band wrong by 45% to 101% | `_integ` clips instead of extending: boxes slide at the top and left, shrink at the bottom and right, with no `mode` | pad by `size - (size - 1) // 2` under the chosen rule, filter, crop | a border band changes; the interior does not |
 
-The **scale bias** of `+5%` to `+33%` is a calibration question. `size =
-int(3 * sigma)` ties the filter width to `sigma` by a constant that does not
-reproduce SURF's own relation between filter size and Gaussian scale. Fixing the
-constant is cheap and changes no algorithm, but it changes output, so it belongs
-in `skimage2` with a note.
+**D1 first.** It is the smallest patch and the clearest bug — an integral-image
+convention mismatch, not an approximation anyone chose. It is also a
+prerequisite for testing D2, because while every box is displaced by a pixel
+there is no clean centre to measure parity against.
 
-The **quantised scale axis** is worth documenting rather than fixing. `num_sigma`
-finer than one third silently computes duplicate planes, and a caller has no way
-to know. A line in the docstring, or rounding `sigma_list` to the realisable
-grid, would prevent the waste.
+**D2 needs a decision, not just a patch.** Both `size` and `size // 3` must be
+odd, and the smallest fix is to round `size` up to the next value satisfying
+both — `size ∈ {3, 5, 9, 11, 15, 17, 21, 23, …}`, i.e. odd and not `1 mod 6`.
+That coarsens the scale axis further, which interacts with D3: recalibrating the
+size-to-sigma constant and constraining the realisable sizes are the same
+conversation, and doing them in one change is cheaper than doing them twice.
 
-The **border** is no longer "leave alone". Section 8 pins it on clamp-to-shrink
-in `_integ`, with no boundary mode. Pad the image by
-`size - (size - 1) // 2` under the desired rule, run the existing filters, crop.
-That matches the pad-once reference to numerical noise, costs a few tens of
-percent on a 256×256 image, and keeps the flat-cost property. It is a separate
-patch from the position-offset fix: pad-once does not move interior peaks.
+**D4 is self-contained** and the measurements in section 8 are ready to become
+a test: exact agreement with a pad-once reference outside `pad_needed(sigma)`,
+1.15x to 1.38x cost on a 256x256 image, flat-cost property preserved.
 
-Replacing the box filters with exact kernels is not the answer to any of these.
-It would fix all four — position, scale, quantisation and border — and cost the
-property the function exists for.
+**The quantised scale axis** is not on the list because it is not a defect to
+fix. `num_sigma` finer than one third silently computes duplicate planes; a
+docstring line, or rounding `sigma_list` onto the realisable grid, is the whole
+remedy. D2 makes the grid coarser still, so document it after D2 lands.
+
+### Would exact kernels be better, given `on_hessian` fixes A and C?
+
+Worth asking, because that notebook's fixes change the arithmetic on the other
+side of the comparison. Fix A computes each Hessian element in one
+`gaussian_filter` call; Fix C repairs the discrete moments of the second
+derivative kernel and, in doing so, removes the need for `truncate = 100` at
+small `sigma`. Together they make the exact route both correct at the border
+and much faster than it was — the `exact_doh` used in sections 7 to 9 above is
+already built on them.
+
+It still is not the answer for `blob_doh`, and the timing table in section 9 is
+why: even with A and C the exact route costs 4.6x at `sigma = 2` and 41.6x at
+`sigma = 16`, because its kernels grow with `sigma` while the box filters do
+not. The gap widens without limit. A `blob_doh` built on exact kernels would fix
+D1 through D4 at a stroke and would be a slower `blob_log` wearing a different
+name.
+
+Where A and C *do* land is `hessian_matrix_det(..., approximate=False)`, which
+routes through `hessian_matrix` and inherits both. That path needs nothing from
+this notebook. The split to hold onto is: `approximate=False` is fixed by the
+`on_hessian` work, `approximate=True` and `blob_doh` need D1 to D4, and no fix
+crosses between them.
 
 Measured with scikit-image from this working tree, OpenCV 5.0.0, on 400x400
 synthetic discs and the 256x256 `camera` photograph.
