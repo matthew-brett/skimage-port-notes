@@ -2159,6 +2159,16 @@ Anti-aliasing is where they actually diverge, and section 7 measures that:
 `line_aa` follows Zingl, OpenCV filters with a Gaussian and touches a wider
 skirt, and Pillow does not anti-alias lines at all.
 
-Measured with Pillow 12.3.0 and OpenCV 5.0.0, over integer endpoints only, for
-segments up to about twelve pixels long. `line_aa` is compared only for
-coverage, not for the endpoint treatment it would want alongside `line`.
+Measured over integer endpoints only, for segments up to about twelve pixels
+long, against the comparator versions this build actually used. `line_aa` is
+compared only for coverage, not for the endpoint treatment it would want
+alongside `line`.
+
+```{code-cell} ipython3
+import PIL
+import skimage
+
+print(f"scikit-image {skimage.__version__}")
+print(f"Pillow       {PIL.__version__}")
+print(f"OpenCV       {cv2.__version__}")
+```
