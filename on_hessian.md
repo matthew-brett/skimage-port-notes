@@ -755,6 +755,10 @@ it sums to `-0.56`, so the operator responds to absolute brightness: a flat
 bright region reads as strongly curved, and the reported curvature depends on
 what you added to the image rather than on its shape.
 
+In what follows we use the term "tap" for a kernel coefficient (AKA kernel
+weight) - see [Wikipedia: Finite impulse
+response](https://en.wikipedia.org/wiki/Finite_impulse_response).
+
 ```{code-cell} ipython3
 def gaussian_taps(sigma, order, trunc):
     """The 1-D kernel `gaussian_filter` builds, from the explicit formula."""
@@ -944,16 +948,22 @@ def corrected_taps(sigma, order, trunc=8):
     return x, k / ((k * x**2).sum() / 2)        # exact on f = x**2 / 2
 ```
 
-The first correction has to be spread **along the Gaussian**, not evenly. The
-obvious alternative is to subtract `k.sum() / k.size` from every tap, which also
-makes the kernel sum to zero. It is much worse, and the reason is the
-`truncate = 100` hack: at `sigma = 0.7` the kernel has 141 taps and about four of
-them carry the operator, so an even correction lays a wide, flat plateau under a
-one-pixel derivative.
+There is a choice in the first correction that turns out to matter more than it
+looks. The obvious way is to subtract `k.sum() / k.size` from every tap, which
+also makes the kernel sum to zero, and it is what DIPlib and VIGRA both do. The
+version above instead subtracts a multiple of the Gaussian itself. The two are
+identical in total and differ only in where they put it.
+
+Spreading it evenly is correct at a sane kernel width and fails at
+`truncate = 100`: with 141 taps at `sigma = 0.7` and about four of them carrying
+the operator, an even correction lays a wide plateau under a one-pixel
+derivative. Spreading it along `g` is insensitive to the window, which is why
+this notebook uses it — but that robustness is only needed because of the
+`truncate` hack, and the subsection on other libraries returns to the point.
 
 ```{code-cell} ipython3
 def flat_corrected_taps(sigma, order, trunc=8):
-    """The naive variant: take the constant out of every tap equally."""
+    """Even subtraction: what DIPlib and VIGRA do, at their own kernel widths."""
     x, k = gaussian_taps(sigma, order, trunc)
     if order != 2:
         return corrected_taps(sigma, order, trunc)
@@ -979,6 +989,127 @@ for sigma in (0.5, 0.7, 1.0):
         with_taps(flat_corrected_taps, blob, sigma, mode="nearest", trunc=trunc), sigma)
     print(f"{sigma:>7}{n:>7}{along:>19.2%}{flat:>17.2%}")
 ```
+
+#### What the correction does, in pictures
+
+The two moment conditions are easier to believe once you see the kernel they
+act on. At `sigma = 1.5` the sampled second derivative is a smooth,
+well-resolved curve; at `sigma = 0.5` it is three or four significant taps
+trying to represent a function that swings through its whole range inside one
+pixel.
+
+```{code-cell} ipython3
+fig, axes = plt.subplots(1, 2, figsize=(9.0, 2.9))
+for ax, sigma in zip(axes, (1.5, 0.5)):
+    x, k = gaussian_taps(sigma, 2, trunc=8)
+    dense = np.linspace(x.min(), x.max(), 2001)
+    g = np.exp(-(dense**2) / (2 * sigma**2))
+    g /= np.exp(-(x**2) / (2 * sigma**2)).sum()
+    ax.plot(dense, g * ((dense**2 - sigma**2) / sigma**4), color=GRID, lw=2,
+            zorder=1, label="the continuous kernel")
+    ax.plot(x, k, "o", color=C_ONE, markersize=6, zorder=3, label="what is sampled")
+    ax.vlines(x, 0, k, color=C_ONE, lw=1.2, zorder=2)
+    ax.axhline(0, color=MUTED, lw=0.8)
+    ax.set_xlim(-5 * sigma, 5 * sigma)
+    ax.set_title(f"sigma = {sigma}: taps sum to {k.sum():+.3f}")
+    ax.tick_params(labelsize=8, colors=MUTED)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    for s in ("left", "bottom"):
+        ax.spines[s].set_color(GRID)
+axes[0].legend(frameon=False, fontsize=8)
+fig.suptitle("the same operator, sampled well and sampled badly", y=1.03)
+fig.tight_layout()
+```
+
+The continuous curve integrates to zero — the positive flanks exactly cancel the
+negative well. The sampled version only inherits that when the samples are dense
+enough to see both. At `sigma = 0.5` they are not, the cancellation fails, and
+the sum is what is left over.
+
+That leftover is the whole defect, and it is visible directly as a response to a
+flat image.
+
+```{code-cell} ipython3
+flat_patch = np.ones((40, 40))
+ramp = np.repeat((np.arange(400.0)[:, None] - 200) ** 2 / 2, 8, axis=1)
+
+fig, axes = plt.subplots(1, 2, figsize=(9.0, 2.9))
+sigmas = np.linspace(0.3, 1.6, 40)
+for taps_of, name, colour in ((gaussian_taps, "as sampled", C_TWO),
+                              (corrected_taps, "corrected", C_ONE)):
+    dc = [with_taps(taps_of, flat_patch, s, mode="nearest")[0][20, 20] for s in sigmas]
+    quad = [with_taps(taps_of, ramp, s, mode="nearest")[0][200, 4] for s in sigmas]
+    axes[0].plot(sigmas, dc, color=colour, lw=2, label=name)
+    axes[1].plot(sigmas, quad, color=colour, lw=2, label=name)
+for ax, target, title in ((axes[0], 0.0, "response to a constant (want 0)"),
+                          (axes[1], 1.0, "response to r**2 / 2 (want 1)")):
+    ax.axhline(target, color=MUTED, lw=1, ls="--")
+    ax.set_xlabel("sigma", fontsize=8, color=MUTED)
+    ax.set_title(title)
+    ax.tick_params(labelsize=8, colors=MUTED)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    for s in ("left", "bottom"):
+        ax.spines[s].set_color(GRID)
+axes[0].legend(frameon=False, fontsize=8)
+fig.suptitle("the two conditions, as functions of scale", y=1.03)
+fig.tight_layout()
+```
+
+Above `sigma = 1` the sampled kernel satisfies both conditions on its own and
+the correction changes nothing. Below it the sampled curve leaves both, fast,
+while the corrected one sits on the target by construction.
+
+**Where the correction is put matters as much as its size.** Both variants
+remove the same total, `k.sum()`. They differ only in how they spread it, and
+that is the whole distance between 0.67% and 96%.
+
+```{code-cell} ipython3
+fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.0))
+for ax, trunc in zip(axes, (8, 100)):
+    x, raw = gaussian_taps(0.5, 2, trunc=trunc)
+    _, g0 = gaussian_taps(0.5, 0, trunc=trunc)
+    # Cumulative mass of each correction, so width is what the eye reads.
+    ax.plot(x, np.cumsum(-raw.sum() * g0), color=C_ONE, lw=2,
+            label="along g: all of it under the operator")
+    ax.plot(x, np.cumsum(np.full_like(x, -raw.sum() / raw.size)), color=C_TWO,
+            lw=2, label="flat: accumulated across the whole window")
+    ax.axvspan(-2, 2, color=GRID, alpha=0.6, zorder=0)
+    ax.annotate("operator\nsupport", (0, 0), xytext=(0, 6), textcoords="offset points",
+                ha="center", fontsize=7, color=MUTED)
+    ax.set_xlim(x.min(), x.max())
+    ax.set_title(f"sigma = 0.5, truncate = {trunc}  ({raw.size} taps, "
+                 f"reach +/-{int(x.max())} px)")
+    ax.set_xlabel("pixels from centre", fontsize=8, color=MUTED)
+    ax.tick_params(labelsize=8, colors=MUTED)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    for s in ("left", "bottom"):
+        ax.spines[s].set_color(GRID)
+axes[0].set_ylabel("cumulative correction", fontsize=8, color=MUTED)
+axes[0].legend(frameon=False, fontsize=7, loc="upper left")
+fig.suptitle("the same total mass, delivered over two very different widths",
+             y=1.03)
+fig.tight_layout()
+```
+
+Both curves climb to the same final value: both variants remove exactly
+`k.sum()`. The difference is *where* they collect it. The along-`g` correction
+has finished by two pixels out — it lies inside the operator's own support, the
+shaded band. The flat correction accrues in a straight line all the way to the
+window edge, so most of its mass sits where the operator has none.
+
+That is why the height of the plateau is the wrong thing to look at. At
+`truncate = 100` the shelf is only 0.0055 tall and looks negligible, but it is
+101 taps wide, and a wide shallow shelf convolved with an image is a local mean
+over 101 pixels. Adding a local mean to a one-pixel second derivative is the
+96%. At `truncate = 8` the window is 9 taps, the shelf is barely wider than the
+operator, and there is almost nothing to add.
+
+The along-`g` correction has no such dependence, because it is shaped like the
+operator it corrects. That is worth stating as the design rule: **remove the
+leaked constant using the same envelope that leaked it.**
 
 Both elements of the Hessian then come from one call each, exactly as in Fix A,
 except that the taps are supplied rather than requested by name. Two 1-D passes
@@ -1157,6 +1288,168 @@ probes them. The choice is therefore about the stated target. `hessian_matrix`
 documents a continuous Gaussian at a scale, so Fix C matches what the docstring
 promises; a library that redefined its scale space as discrete would prefer
 Lindeberg's.
+
+#### What other libraries do, and why this is not fixed upstream
+
+The correction is not novel. Two of the four comparators already apply it or
+avoid needing it, and they disagree about which.
+
+| library | second-derivative kernel | sums to zero? |
+| --- | --- | --- |
+| `scipy.ndimage` | samples the analytic derivative, no correction | only when well sampled |
+| `scikit-image` | never asks scipy for one; composes two first-order calls | yes, by construction |
+| DIPlib | samples, subtracts the mean, normalises the second moment | yes, enforced |
+| VIGRA | samples, subtracts the mean, normalises the moment | yes, enforced |
+| ITK | never samples; discrete analogue convolved with a difference operator | yes, by construction |
+| OpenCV | fixed small integer kernels (`Sobel`, `Scharr`), no `sigma` | yes, by construction |
+
+**DIPlib does exactly what Fix C does, and said so in the page `corner.py`
+cites.** The comment in `_hessian_matrix_with_gaussian` points at a Signal
+Processing Stack Exchange question,
+[*Are scipy second-order Gaussian derivatives correct?*](https://dsp.stackexchange.com/questions/78280/are-scipy-second-order-gaussian-derivatives-correct).
+The question is this defect, found from the other end: the asker takes an image
+constant down every column, asks scipy for the second derivative *along* that
+constant direction, and gets `1e-5` where zero is the only right answer. That is
+condition 1 failing, discovered without naming it.
+
+```{code-cell} ipython3
+line_img = np.zeros((30, 30))
+line_img[:, 15] = 1.0                     # constant down every column
+
+two_call = ndi.gaussian_filter(
+    ndi.gaussian_filter(line_img, np.sqrt(0.5), order=[1, 0], mode="reflect"),
+    np.sqrt(0.5), order=[1, 0], mode="reflect")
+
+x_dip, k_dip = corrected_taps(1.0, 2, trunc=4)
+smooth = corrected_taps(1.0, 0, trunc=4)[1]
+fixed_out = ndi.correlate1d(
+    ndi.correlate1d(line_img, k_dip, axis=0, mode="reflect"), smooth, axis=1,
+    mode="reflect")
+
+print("second derivative along the constant axis; the only right answer is 0")
+for name, out in (
+    ("scipy, order=[2, 0]",
+     ndi.gaussian_filter(line_img, sigma=1, order=[2, 0], mode="reflect")),
+    ("two first-order calls", two_call),
+    ("corrected kernel", fixed_out),
+):
+    print(f"   {name:<24} max |response| = {np.abs(out).max():.3e}")
+```
+
+The accepted answer, by an author of [DIPlib](https://diplib.org), gives both
+the cause and the cure. The cause, better put than in section 3: "one can not
+just sample a derivative of Gaussian to obtain a convolution kernel, because the
+Gaussian function is not band-limited, and so sampling causes aliasing ... as
+the order of the derivative increases, so does the bandlimit, meaning that the
+higher the derivative order, the more sampling error we get." That is why the
+first derivative survives sampling and the second does not, and it predicts that
+a third derivative would be worse again.
+
+The cure is DIPlib's own recipe, quoted in the answer as Python:
+
+```
+    g2 -= np.mean(g2)
+    g2 /= np.sum(g2 * x**2) / 2.0
+```
+
+Subtract the mean; normalise the second moment. Those are the two conditions of
+this subsection, in that order, at `radius = ceil(4 * sigma)`.
+
+**So the fix was in the page `scikit-image` cites.** The question proposes the
+two-call workaround in passing — "interestingly, we *do* get the correct result
+if we apply two successive first-derivative operations" — and the answer, posted
+thirteen days later, gives the kernel correction. `corner.py` took the
+workaround from the question. Section 7 is what the workaround costs, and Fix C
+is the answer that was one scroll further down. That is the most likely reason
+this is not fixed upstream in `scikit-image`: not that the fix is unknown or
+disputed, but that the decision was taken before the answer arrived and has not
+been revisited since.
+
+**VIGRA arrived at the same recipe independently.** `Kernel1D::initGaussianDerivative`
+samples the analytic derivative, subtracts the leaked constant, and then
+normalises the moment to a documented condition — "the sum from left to right
+of `(-i)^order * kernel[i] / order!` equals norm", which for `order = 2` is
+`sum(k * x**2) / 2 == 1`, the second condition above. Its own comment names the
+cause the way this notebook does: *"calculate the DC component introduced by
+truncation of the Gaussian"*. Passing `norm = 0` opts out and returns the raw
+sampled kernel, so the correction is a deliberate, documented default.
+
+Both libraries subtract the DC **flat** — VIGRA as `kernel_[i] -= dc` with
+`dc = sum / (2*radius+1)`, DIPlib as `g2 -= np.mean(g2)`. That is the variant
+this notebook called worse, and the reconciliation is the kernel width. Both
+size their kernel at four sigma — VIGRA at `(3.0 + 0.5 * order) * std_dev`,
+DIPlib at `ceil(4.0 * sigma)` — so the plateau is never much wider than the
+operator, and the objection never arises.
+
+```{code-cell} ipython3
+print(f"{'sigma':>7}{'radius rule':>22}{'taps':>6}"
+      f"{'flat (VIGRA style)':>21}{'along g (Fix C)':>18}")
+for sigma in (0.5, 0.7, 1.0):
+    for name, radius in ((f"4*sigma, VIGRA", max(int(4 * sigma + 0.5), 1)),
+                         (f"100*sigma, skimage", int(100 * sigma + 0.5))):
+        trunc = radius / sigma
+        flat = relative_error(
+            with_taps(flat_corrected_taps, blob, sigma, mode="nearest", trunc=trunc), sigma)
+        along = relative_error(
+            with_taps(corrected_taps, blob, sigma, mode="nearest", trunc=trunc), sigma)
+        print(f"{sigma:>7}{name:>22}{2 * radius + 1:>6}{flat:>20.2%}{along:>18.2%}")
+```
+
+At the four-sigma radius the two agree and both are fine. At skimage's the flat
+variant fails and the along-`g` variant is unchanged, because it is shaped like
+the operator rather than like the window.
+
+Two conclusions follow, and the second is the one that matters. A port of the
+DIPlib or VIGRA code into `skimage` that copied it faithfully would break, and
+the reason would be `truncate = 100` rather than anything in either library. But
+the better response is not to reshape the correction: it is to stop building a
+101-tap kernel for a one-pixel operator. Fix C already drops the `truncate`
+hack on accuracy grounds, and once it is gone the plain mean subtraction that
+two shipping libraries use is correct here too. The along-`g` form is then a
+belt-and-braces choice rather than a necessity — worth keeping because it costs
+nothing and removes a dependency between two parts of the function that ought
+not to interact, but not the thing that distinguishes this fix.
+
+**ITK takes the other route.** `GaussianDerivativeOperator` never samples a
+continuous derivative. It builds Lindeberg's discrete analogue from modified
+Bessel functions, normalises those to sum to one, and then convolves with a
+small difference operator. A difference operator sums to zero, so the product
+does too, whatever the scale — the defect cannot arise. This is the
+construction of the previous subsection, in a shipping library.
+
+**OpenCV sidesteps the question.** `Sobel` and `Scharr` are fixed small integer
+kernels with no `sigma` at all; the scale comes from blurring first. Their
+second-derivative kernels are exactly `(1, -2, 1)`-like and sum to zero as
+integers. Section 3 compares against them.
+
+**So why is `scipy.ndimage` unchanged?** Honestly, this notebook cannot say from
+evidence. A search of the scipy tracker for an issue about `gaussian_filter`
+with `order=2` at small `sigma` returned nothing, so there may simply be no
+report. What can be said is what the choice *is*: `gaussian_filter` documents
+itself as convolving with a Gaussian derivative, and a sampled analytic
+derivative is the literal reading of that. Correcting the moments would make it
+a different, better-behaved operator that is no longer the sampled derivative of
+anything, and would silently change every existing caller's output. That is a
+defensible reason to leave a general-purpose primitive alone and to expect the
+correction in the library that needs it — which is what DIPlib and VIGRA both
+do. The Stack Exchange answer takes the same line: it does not call scipy
+broken, it says "we need some tricks to make the Gaussian derivatives more
+precise" and shows where DIPlib keeps them.
+
+Worth noting what `scikit-image`'s workaround gets right, because it is not an
+error. First-order kernels are odd, so they sum to zero by symmetry however
+badly they are sampled; composing two of them dodges the DC leak without
+touching a kernel at all. On the questioner's own test it returns exactly zero,
+where the corrected kernel returns 2e-17 — marginally *better*, on that test.
+The price is invisible from that test and is the whole of section 7: the second
+call re-extends a boundary the first has already smoothed. Fix C pays it back by
+repairing the kernel rather than avoiding it.
+
+The area has open, unresolved reports.
+[#6451](https://github.com/scikit-image/scikit-image/issues/6451) observes that
+the two `use_gaussian_derivatives` paths differ by about a factor of two and has
+been dormant since 2022; it is a different symptom, and section 3's accuracy
+comparison is the closest thing here to an answer.
 
 #### Does it still behave like a scale space?
 
@@ -1368,8 +1661,8 @@ never touches this code path at all.
 
 ## 11. Preferred fix, and what it changes
 
-Take **A and D together**. A removes the cause of the border defect — a boundary
-extension applied per call, so one call per element — and D removes the only
+Take **A and C together**. A removes the cause of the border defect — a boundary
+extension applied per call, so one call per element — and C removes the only
 price A charges for it.
 
 | | A, one call | B, pad once | A + C |
