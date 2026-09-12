@@ -21,7 +21,7 @@ NOTEBOOKS := $(shell $(PYTHON) -c "import yaml; d=yaml.safe_load(open('_toc.yml'
   print(' '.join(f['file']+'.md' for p in d.get('parts',[]) for f in p['chapters'] \
   if p.get('caption')=='Diagnostic notebooks'))" 2>/dev/null)
 
-.PHONY: help env guard html book check check-all github clean rm-ipynb
+.PHONY: help env guard html book check check-all github clean rm-ipynb bresenham-fixtures
 
 help:
 	@echo "make env       show the interpreter and kernels the notebooks will use"
@@ -30,6 +30,7 @@ help:
 	@echo "make html      build the book, warnings as errors"
 	@echo "make github    build and publish to GitHub Pages"
 	@echo "make clean     remove _build and the paired .ipynb files"
+	@echo "make bresenham-fixtures   regenerate bresenham_nd_fixtures/*.json"
 	@echo
 	@echo "notebooks: $(NOTEBOOKS)"
 
@@ -75,3 +76,10 @@ clean: rm-ipynb
 
 rm-ipynb:
 	rm -rf *.ipynb
+
+# Needs the bresenham-nd build (not the port-notes env). Example:
+#   PYENV_VERSION=bresenham-nd make bresenham-fixtures
+SKIMAGE_ROOT ?= ../bresenham-nd/build-install/usr/lib/python3.13/site-packages
+bresenham-fixtures:
+	$(PYTHON) bresenham_nd_fixtures/generate_fixtures.py \
+	  --skimage-root $(SKIMAGE_ROOT)
