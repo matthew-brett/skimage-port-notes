@@ -5,7 +5,7 @@ jupytext:
     extension: .md
     format_name: myst
     format_version: 0.13
-    jupytext_version: 1.19.1
+    jupytext_version: 1.19.5
 kernelspec:
   name: python3
   display_name: Python 3 (ipykernel)
@@ -284,14 +284,29 @@ The box filter has the right gross shape — negative centre, positive flanks �
 and the wrong everything else: hard edges, no tails, and a width fixed by
 integer arithmetic rather than by `sigma`.
 
-It is also **not centred**. `mid` starts at `c - s2` with `s2 = (size - 1) // 2`
-and runs `size` columns; `side` starts at `c - s3 // 2` and runs `s3`. Where
-`size` or `s3` is even, neither box can straddle the centre pixel, so the whole
-filter sits half a pixel off. The panels above show it: at `sigma = 2` the
-negative lobe spans roughly `-1.5` to `+0.5` rather than `-1` to `+1`.
+It is also **not centred**, for two separate reasons.
 
-A second-derivative filter that is not symmetric reports its maxima in the wrong
-place, and that reaches the caller as a position error rather than a size error.
+The first is integer geometry. `mid` starts at `c - s2` with
+`s2 = (size - 1) // 2` and runs `size` columns; `side` starts at
+`c - s3 // 2` and runs `s3`. Where `size` is even, neither box can straddle the
+centre pixel, so the filter sits half a pixel off. The panels above show it: at
+`sigma = 2` the negative lobe spans roughly `-1.5` to `+0.5` rather than
+`-1` to `+1`. The source even has `if size % 2 == 0: size += 1`, but that line
+runs *after* `s2`, `s3` and `w` are computed, so it has no effect on the filter.
+
+The second is an off-by-one between `_integ` and `integral_image`. Skimage's
+integral image has the same shape as the input, with
+`S[m, n] = sum of X[i, j] for i <= m, j <= n`. The four-corner formula in
+`_integ` is the OpenCV convention for a table of shape `(H + 1, W + 1)` with a
+leading row and column of zeros. On a same-shape table that formula sums the
+rectangle one pixel down and right of the corner it names. Every box in the
+filter therefore sits one pixel toward the bottom-right of `(r, c)`, and a
+symmetric blob peaks when `(r, c)` is one pixel up and left of the true centre.
+
+The half-pixel even-`size` term is real, but it is not what produces the
+constant `(-1, -1)` on discs: that offset appears at odd `size` too. Correcting
+the integral indexing, with the image padded so clamping cannot interfere,
+moves odd-`size` peaks onto the centre.
 
 ```{code-cell} ipython3
 DETECTORS = {"blob_dog": lambda im: blob_dog(im, min_sigma=2, max_sigma=30,
@@ -317,8 +332,9 @@ for r0, c0, radius in TRUTH:
 ```
 
 `blob_dog` and `blob_log` land on the centre exactly. `blob_doh` is one pixel up
-and one pixel left, at every radius. Over random centres and radii the column
-offset is `-1` every time and the row offset is `-1` almost every time.
+and one pixel left, at every radius — including radii whose `int(3 * sigma)` is
+odd. Over random centres and radii the column offset is `-1` every time and the
+row offset is `-1` almost every time.
 
 ```{code-cell} ipython3
 rng = np.random.default_rng(0)
@@ -347,6 +363,19 @@ print(f"   mean offset      : {offsets.mean(axis=0)}")
 
 A constant offset is the easiest kind of defect to fix and the easiest to miss,
 because every blob moves together and the picture still looks right.
+
+```{code-cell} ipython3
+# `_integ`'s four-corner formula on a same-shape integral, vs the sum it names.
+probe = np.arange(1.0, 26.0).reshape(5, 5)
+ii = ski.transform.integral_image(probe)
+r, c, rl, cl = 1, 1, 2, 2
+named = probe[r:r + rl, c:c + cl].sum()
+formula = ii[r, c] + ii[r + rl, c + cl] - ii[r, c + cl] - ii[r + rl, c]
+shifted = probe[r + 1:r + rl + 1, c + 1:c + cl + 1].sum()
+print(f"sum of the named window     : {named:.0f}")
+print(f"four-corner formula on ii   : {formula:.0f}")
+print(f"sum one pixel down and right: {shifted:.0f}")
+```
 
 ## 6. The scale axis is quantised
 
@@ -431,6 +460,17 @@ def box_doh(image, sigma):
     calls the same routine `blob_doh` uses; the two agree bit for bit.
     """
     return hessian_matrix_det(image, sigma=sigma, approximate=True)
+
+
+def best_of(f, n=5):
+    """Minimum of `n` timed calls, after one warmup call."""
+    f()
+    times = []
+    for _ in range(n):
+        t0 = time.perf_counter()
+        f()
+        times.append(time.perf_counter() - t0)
+    return min(times)
 ```
 
 ```{code-cell} ipython3
@@ -494,23 +534,153 @@ for sigma in (2.0, 4.0, 8.0):
 
 The exact route is exact at the border, for the reason `on_hessian.md` section 7
 sets out: one filter call per element, so the boundary rule is applied once. The
-box route has no boundary rule at all — `_integ` clamps rectangle corners to the
-image, which silently shrinks the filter near an edge and changes what it
-computes.
+box route is not. The rest of this section diagnoses why, and what a fix costs.
+
+### What `_integ` does at the edge
+
+Every box sum goes through `_integ`, which clips each corner of the requested
+rectangle to the image and then applies the four-corner integral formula. There
+is no `mode`, and no pad. A rectangle that sticks out is not extended: it is
+**shrunk** until it fits.
+
+```{code-cell} ipython3
+def pad_needed(sigma):
+    """Half-width the filter can reach past a pixel, in pixels.
+
+    From the rectangle list in `_hessian_matrix_det`: the farthest look is
+    `size - (size - 1) // 2` (the `dyy` mid box runs `size` rows from
+    `r - s2`).
+    """
+    size = int(3 * sigma)
+    return size - (size - 1) // 2
+
+
+def requested_vs_clamped(r, c, rl, cl, shape):
+    """What `_integ` asks for, and what clamping leaves behind."""
+    h, w = shape
+
+    def clip(x, lo, hi):
+        return hi if x > hi else (lo if x < lo else x)
+
+    r0, c0 = clip(r, 0, h - 1), clip(c, 0, w - 1)
+    r1, c1 = clip(r0 + rl, 0, h - 1), clip(c0 + cl, 0, w - 1)
+    return (rl, cl), (r1 - r0, c1 - c0)
+
+
+sigma = 4.0
+size = int(3 * sigma)
+s2, s3 = (size - 1) // 2, size // 3
+# The dyy mid box at the top-left corner: `_integ(img, r - s2, c - s3 + 1, w, 2*s3 - 1)`.
+ask, got = requested_vs_clamped(0 - s2, 0 - s3 + 1, size, 2 * s3 - 1, photo.shape)
+print(f"sigma = {sigma}, size = {size}, pad_needed = {pad_needed(sigma)}")
+print(f"dyy mid at (0, 0): requested {ask}, after clamp {got}")
+```
+
+The weights still divide by `size ** 2`, as if the full box were present. Near an
+edge the operator is therefore a different filter: fewer taps, the wrong
+`(1, -2, 1)` balance, and a normalisation that no longer matches the area
+actually summed.
+
+### The defect is a band, not a haze
+
+```{code-cell} ipython3
+sigma = 4.0
+need = pad_needed(sigma)
+pad = 2 * int(8 * sigma + 0.5) + 1
+reference = box_doh(np.pad(photo, pad, mode="edge"), sigma)[pad:-pad, pad:-pad]
+gap = np.abs(box_doh(photo, sigma) - reference)
+
+rr, cc = np.indices(photo.shape)
+dist = np.minimum(np.minimum(rr, cc),
+                  np.minimum(photo.shape[0] - 1 - rr, photo.shape[1] - 1 - cc))
+
+print(f"{'dist to border':>16}{'max |error|':>14}")
+for d in range(need + 2):
+    band = gap[dist == d]
+    print(f"{d:>16}{band.max():>14.3e}")
+```
+
+```{code-cell} ipython3
+fig, axes = plt.subplots(1, 3, figsize=(9.6, 3.2))
+bare(axes[0], "response, as shipped")
+axes[0].imshow(box_doh(photo, sigma), cmap=SEQ)
+bare(axes[1], "pad-once reference")
+axes[1].imshow(reference, cmap=SEQ)
+bare(axes[2], "|shipped − reference|")
+axes[2].imshow(gap, cmap=SEQ)
+fig.suptitle(f"sigma = {sigma}: error lives in a {need}-pixel border band", y=1.04)
+fig.tight_layout()
+```
+
+Inside `dist >= pad_needed(sigma)` the two agree to numerical noise. Outside, the
+relative error reaches tens of percent of the peak response. On a 256×256 image
+that band is about 6% of the pixels at `sigma = 2` and about 35% at
+`sigma = 16`.
+
+This is a different border defect from the one in `hessian_matrix`
+(`on_hessian.md`). There, a boundary rule is applied, but twice, so the second
+pass invents values. Here no boundary rule is applied at all: the filter itself
+changes shape.
+
+### Fix: pad once, then crop
+
+Extend the image by `pad_needed(sigma)` under the chosen boundary rule, build
+the integral image on that padded array, run the existing box filters, and crop
+back. Every surviving pixel then sees a full-size filter over edge-extended
+data — the same construction the measurement above uses as its reference.
+
+```{code-cell} ipython3
+def box_doh_padded(image, sigma, mode="edge"):
+    """Approximate DoH with a single boundary extension."""
+    p = pad_needed(sigma)
+    return box_doh(np.pad(image, p, mode=mode), sigma)[p:-p, p:-p]
+
+
+print(f"{'sigma':>6}{'as shipped':>14}{'pad once':>12}{'pad':>6}")
+for sigma in (2.0, 4.0, 8.0, 16.0):
+    p_ref = 2 * int(8 * sigma + 0.5) + 1
+    reference = box_doh(np.pad(photo, p_ref, mode="edge"),
+                        sigma)[p_ref:-p_ref, p_ref:-p_ref]
+    scale = max(np.abs(reference).max(), 1e-12)
+    shipped = np.abs(box_doh(photo, sigma) - reference).max() / scale
+    fixed = np.abs(box_doh_padded(photo, sigma) - reference).max() / scale
+    print(f"{sigma:>6}{shipped:>13.1%}{fixed:>12.1e}{pad_needed(sigma):>6}")
+```
+
+```{code-cell} ipython3
+print(f"{'sigma':>6}{'pad':>6}{'as shipped':>12}{'pad once':>10}{'cost':>8}")
+for sigma in (2.0, 4.0, 8.0, 16.0):
+    p = pad_needed(sigma)
+    t_now = best_of(lambda: box_doh(photo, sigma))
+    t_pad = best_of(lambda: box_doh_padded(photo, sigma))
+    print(f"{sigma:>6}{p:>6}{t_now * 1e3:>9.2f} ms{t_pad * 1e3:>7.2f} ms"
+          f"{t_pad / t_now:>7.2f}x")
+```
+
+The cost is a few tens of percent on this 256×256 photograph, not an order of
+magnitude. The box-filter property — cost independent of `sigma` in the filter
+itself — is preserved; only the padded area grows with `sigma`, and linearly.
+
+Two alternatives are worse for this function:
+
+* **Replace the boxes with exact Gaussian derivatives.** That clears the border,
+  and the scale bias, and the position offset, but it destroys the flat-cost
+  reason `blob_doh` exists. `blob_log` already is that detector.
+* **Only set `exclude_border` in the peak search.** That hides false maxima in
+  the bad band; it does not make the response correct for any pixel that still
+  uses a shrunk filter, and it throws away a growing fraction of the image as
+  `sigma` grows.
+
+The pad-once fix is local to `hessian_matrix_det(..., approximate=True)` (or to
+the wrapper that builds its integral image). It does not repair the one-pixel
+position offset in the interior: that is the `_integ` indexing defect of
+section 5, and it needs its own change.
+
++++
 
 ## 9. What the approximation buys
 
 ```{code-cell} ipython3
-def best_of(f, n=5):
-    f()
-    times = []
-    for _ in range(n):
-        t0 = time.perf_counter()
-        f()
-        times.append(time.perf_counter() - t0)
-    return min(times)
-
-
 print(f"{'sigma':>6}{'box filters':>14}{'exact':>11}{'ratio':>9}")
 for sigma in (2.0, 4.0, 8.0, 16.0):
     t_box = best_of(lambda: box_doh(photo, sigma))
@@ -598,10 +768,13 @@ it shrinks when the caller asks for it to, and it matches what SIFT does.
 **`blob_doh`.** Four separate things, worth separating.
 
 The **one-pixel position offset** is the clearest defect and the cheapest to
-fix. Every blob is reported one pixel up and left because the box filters cannot
-straddle the centre pixel at even widths. It is a constant, it affects every
-call, and it has nothing to do with the approximation the function is allowed to
-make. This one is worth an upstream issue on its own.
+fix. Every blob is reported one pixel up and left because `_integ` applies an
+OpenCV-style four-corner formula to skimage's same-shape integral image, so
+every box sits one pixel down and right of the centre it names. The even-`size`
+half-pixel term of section 5 is a second, smaller centring error; the dead
+`size += 1` line does not remove it. The constant offset affects every call and
+has nothing to do with the approximation the function is allowed to make. This
+one is worth an upstream issue on its own.
 
 The **scale bias** of `+5%` to `+33%` is a calibration question. `size =
 int(3 * sigma)` ties the filter width to `sigma` by a constant that does not
@@ -614,12 +787,16 @@ finer than one third silently computes duplicate planes, and a caller has no way
 to know. A line in the docstring, or rounding `sigma_list` to the realisable
 grid, would prevent the waste.
 
-The **border** is the one to leave alone for now. It is larger than the
-`hessian_matrix` defect, it has a different cause, and this notebook has
-measured it without diagnosing it.
+The **border** is no longer "leave alone". Section 8 pins it on clamp-to-shrink
+in `_integ`, with no boundary mode. Pad the image by
+`size - (size - 1) // 2` under the desired rule, run the existing filters, crop.
+That matches the pad-once reference to numerical noise, costs a few tens of
+percent on a 256×256 image, and keeps the flat-cost property. It is a separate
+patch from the position-offset fix: pad-once does not move interior peaks.
 
 Replacing the box filters with exact kernels is not the answer to any of these.
-It would fix the first and third and cost the property the function exists for.
+It would fix all four — position, scale, quantisation and border — and cost the
+property the function exists for.
 
 Measured with scikit-image from this working tree, OpenCV 5.0.0, on 400x400
 synthetic discs and the 256x256 `camera` photograph.
