@@ -231,8 +231,9 @@ advises against a `sigma` much less than 1. The next subsection says what that
 word means here, what the source's `truncate = 100` line does about it, and why
 that choice forces enormous image padding later.
 
-Two further points are revisited with the fixes. The aliasing is repairable in
-the kernel rather than inherent to the method, which is Fix C; and the
+Two further points are revisited with the fixes. The aliasing itself is not
+repairable — it is lost information — but its two *unconditional* consequences
+are, which is Fix C and the subject of the last part of this section; and the
 crossover itself moves with the test image, because `blob` is very smooth and
 that flatters finite differences more than a textured image would.
 
@@ -406,10 +407,11 @@ The guard is also why the numbers jump at `sigma = 1.01`: the test is
 `all(s > 1 for s in sigma)`, so a hair above one the radius falls from 100 to 8
 and everything downstream gets cheaper at a stroke.
 
-The real repair is to **impose the discrete moments after sampling** (Fix C).
-Once that is done, `truncate = 8` and `truncate = 100` agree, and the padding
-shrinks with the support. Until then, treat `truncate = 100` as a historical
-guard whose main measurable effect in this notebook is cost, not accuracy.
+Treat `truncate = 100` as a historical guard whose only measurable effect in
+this notebook is cost. What to do instead is Fix C — which does not undo the
+aliasing, because nothing can, but does remove the part of it that is wrong for
+every image. Fix C's subsection "what correcting the taps can and cannot do"
+draws that line precisely.
 
 +++
 
@@ -1388,6 +1390,128 @@ for sigma in (0.5, 1.0, 1.5, 3.0):
     t_c = best_of(lambda: fix_c(photo, sigma))
     print(f"{sigma:>6}{t_s * 1e3:>9.1f} ms{t_a * 1e3:>7.1f} ms{t_c * 1e3:>7.1f} ms")
 ```
+
+#### What correcting the taps can and cannot do
+
+It is tempting to read Fix C as undoing the aliasing. It does not, and the
+distinction decides where the fix works.
+
+**Aliasing destroys information.** Sampling on the integer grid makes the
+discrete kernel's transfer function the *periodised* continuous one:
+
+```
+    H(w)  =  sum over k of  Ghat(w + 2*pi*k)
+```
+
+Everything the continuous operator had beyond Nyquist is folded back and added
+in. Folding is many-to-one. No choice of coefficients can separate what was
+added, because the samples no longer carry it. If the operator you want has
+energy above `pi` — and `-w**2 exp(-s**2 w**2 / 2)` always does — then no FIR on
+this grid is that operator.
+
+**What the two conditions actually constrain is `H` at `w = 0`.** For an even
+kernel `H(w) = sum(k[n] cos(w n))`, so
+
+```
+    H(0)      =  sum(k)                 -> the first condition sets it to 0
+    H''(0)    =  -sum(k * n**2)         -> the second sets it to -2
+```
+
+which are the value and the curvature of the transfer function at the origin.
+The ideal operator has `Ghat(w) -> -w**2` as `w -> 0`: value zero, curvature
+`-2`. So the two moment conditions are exactly "agree with the ideal operator at
+DC, to second order". They say nothing about any other frequency.
+
+```{code-cell} ipython3
+def transfer(x, k, omega):
+    """Transfer function of an even kernel, H(w) = sum k[n] cos(w n)."""
+    return np.array([np.sum(k * np.cos(w * x)) for w in omega])
+
+
+omega = np.linspace(0, np.pi, 400)
+
+fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.0))
+for ax, sigma in zip(axes, (0.5, 1.5)):
+    ideal = -(omega**2) * np.exp(-(sigma**2) * omega**2 / 2)
+    x_raw, k_raw = gaussian_taps(sigma, 2, 8)
+    x_fix, k_fix = corrected_taps(sigma, 2, 8)
+    ax.plot(omega, ideal, color=INK, lw=2.4, label="ideal, continuous")
+    ax.plot(omega, transfer(x_raw, k_raw, omega), color=C_TWO, lw=1.8,
+            label="sampled")
+    ax.plot(omega, transfer(x_fix, k_fix, omega), color=C_ONE, lw=1.8, ls="--",
+            label="moments corrected")
+    ax.axvline(np.pi, color=GRID, lw=1)
+    ax.annotate("Nyquist", (np.pi, 0), xytext=(-46, 8), textcoords="offset points",
+                fontsize=7, color=MUTED)
+    ax.set_xlabel("spatial frequency, radians per pixel", fontsize=8, color=MUTED)
+    ax.set_title(f"sigma = {sigma}")
+    ax.tick_params(labelsize=8, colors=MUTED)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(GRID)
+axes[0].legend(frameon=False, fontsize=7, loc="lower left")
+fig.suptitle("the correction pins the operator at DC; it does not restore it "
+             "elsewhere", y=1.03)
+fig.tight_layout()
+```
+
+At `sigma = 1.5` all three curves lie on top of one another: the smoothing has
+already put the operator's energy well inside Nyquist, nothing folds, and there
+is nothing to correct.
+
+At `sigma = 0.5` the sampled curve is wrong everywhere, including a finite value
+at `w = 0` — the DC leak, visible as a vertical offset. The corrected curve
+starts exactly on the ideal and peels away as frequency rises.
+
+```{code-cell} ipython3
+# Scale the error by the operator's own peak response, not by the ideal at that
+# frequency: the ideal decays to ~0 near Nyquist for large sigma, and dividing
+# by it turns a negligible absolute error into a meaningless percentage.
+print("error of the corrected kernel against the ideal,")
+print("as a fraction of that operator's peak response")
+print(f"{'omega':>8}{'wavelength, px':>17}{'sigma = 0.5':>14}{'sigma = 1.5':>14}")
+for w in (0.4, 0.8, 1.6, 2.4, np.pi):
+    row = ""
+    for sigma in (0.5, 1.5):
+        ideal_band = -(omega**2) * np.exp(-(sigma**2) * omega**2 / 2)
+        want = -(w**2) * np.exp(-(sigma**2) * w**2 / 2)
+        x_fix, k_fix = corrected_taps(sigma, 2, 8)
+        got = float(transfer(x_fix, k_fix, np.array([w]))[0])
+        row += f"{abs(got - want) / np.abs(ideal_band).max():>14.1%}"
+    print(f"{w:>8.2f}{2 * np.pi / w:>17.1f}{row}")
+```
+
+So the honest description of Fix C is not "it removes the aliasing". It is:
+
+* **It removes the errors that are wrong for every image.** A second-derivative
+  operator that responds to a constant is wrong whatever the image contains, and
+  one with the wrong curvature at DC reports the wrong magnitude for any smooth
+  feature. Those are the two moments, and they are now exact.
+* **It leaves a frequency-dependent residual** that grows toward Nyquist and is
+  irreducible at this sampling. The table above is that residual.
+
+The `sigma = 1.5` column is zero throughout, including at Nyquist where the
+ideal operator has almost no response left to get wrong. That is the point of
+scaling by the peak rather than by the ideal at each frequency: a large absolute
+agreement with a near-zero target is not an error, and dividing by that target
+would report it as one.
+
+That is why the correction works so well in practice, and why the earlier
+accuracy tables look the way they do. A Gaussian-smoothed image is meant to have its content at
+low frequency; that is what the smoothing is for. Correcting the operator where
+the signal lives buys most of the available accuracy. The residual only bites
+for content near Nyquist — which is exactly the pattern of the sinusoid table
+later in Fix C, where the corrected kernel is 0.07% wrong at a 40-pixel
+wavelength and 7.8% wrong at 4 pixels.
+
+It also explains the one regime Fix C cannot rescue. At `sigma = 0.4` the
+smoothing barely attenuates anything, so a real image still has substantial
+energy near Nyquist, where the operator is still wrong however well its moments
+are set. No kernel repair fixes that; only a larger `sigma`, or a different
+grid, does.
+
++++
 
 #### The construction the literature recommends
 
