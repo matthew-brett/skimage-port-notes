@@ -547,6 +547,133 @@ practice, where "probability zero" is not available: integer endpoints put the
 midpoint of an odd-length run exactly on a half every time. Section 10 comes
 back to what Knuth's infinitesimal shift means for the choice of rounding rule.
 
+### How one coordinate breaks the whole line
+
+`np.round([0.5, 1.5]) == [0, 2]` is a fact about two numbers. Getting from there
+to a hole in a drawn line takes three steps.
+
+**A line is connected when consecutive pixels touch.** `line_nd` documents
+ndim-connectivity: "two subsequent pixels in the line will be either direct or
+diagonal neighbors". Neighbours differ by at most 1 in **every** axis, so
+connectivity is a condition on all the axes at once. It therefore fails if any
+*single* axis jumps by 2. The other axes cannot make up for it — a pixel two
+rows away is not a neighbour whatever the columns do.
+
+**Before rounding, the samples are already close enough.** `npoints` comes from
+the largest of the deltas, so the axis with furthest to travel advances exactly
+1 per sample and every other axis advances less. The chain of real-valued
+samples is connected with room to spare. Every gap is made by the rounding.
+
+**Rounding moves each sample by at most half a pixel.** So two samples exactly 1
+apart can land at most `1 + 1/2 + 1/2 = 2` apart. Reaching 2 needs both halves
+of that slack, which means the first sample must round **down** by exactly a
+half and the second **up** by exactly a half. Only exact halves round by exactly
+a half, so both samples must be halves, and they must round in opposite
+directions.
+
+Half-to-even supplies both conditions at once. Which way it rounds a half
+depends on which neighbour is even, and that alternates from one half to the
+next:
+
+```{code-cell} ipython3
+print(f"{'sample':>8}{'rounds to':>12}{'direction':>12}{'error':>9}"
+      f"{'because':>28}")
+for value in (0.5, 1.5, 2.5, 3.5):
+    got = np.round(value)
+    below, above = int(np.floor(value)), int(np.ceil(value))
+    even = below if below % 2 == 0 else above
+    print(f"{value:>8}{got:>12.0f}{'down' if got < value else 'up':>12}"
+          f"{got - value:>+9.1f}{f'{even} is the even neighbour':>28}")
+```
+
+So consecutive halves round alternately down, up, down, up — which is exactly
+the down-then-up pattern a two-pixel jump requires. Two consecutive halves on
+one axis are all it takes.
+
+The geometry says the same thing in one sentence. A sample at row `0.5` sits
+exactly on the boundary between rows 0 and 1, touching both; the next sample, at
+row `1.5`, sits on the boundary between rows 1 and 2. **Row 1 is the row they
+have in common.** Half-to-even sends the first sample to row 0 and the second to
+row 2, so row 1 is skipped — the exact line crosses it, and no pixel of it is
+ever drawn.
+
+```{code-cell} ipython3
+gap_start, gap_stop = (0.5, 0.0), (3.5, 3.0)
+gap_samples = np.linspace(gap_start, gap_stop, 4)
+gap_rows, gap_cols = gap_samples[:, 0], gap_samples[:, 1]
+
+to_even = [(int(np.round(r)), int(c)) for r, c in gap_samples]
+to_up = [(int(np.floor(r + 0.5)), int(c)) for r, c in gap_samples]
+SHAPE_ROWS, SHAPE_COLS = 5, 4
+SHAPE = (SHAPE_ROWS, SHAPE_COLS)
+
+drawn_rows = {row for row, _ in to_even}
+skipped_rows = [r for r in range(SHAPE_ROWS) if r not in drawn_rows]
+
+fig, axes = plt.subplots(1, 3, figsize=(9.6, 2.9))
+
+pixel_axes(axes[0], SHAPE, "every sample lands on a row boundary")
+for boundary in (0.5, 1.5, 2.5, 3.5):
+    axes[0].axhline(boundary, color=C_LINE, lw=1.4, ls="--", zorder=2)
+exact(axes[0], gap_start, gap_stop, color=INK)
+axes[0].plot(gap_cols, gap_rows, "o", color=INK, markersize=5, zorder=6)
+for row, col in gap_samples:
+    axes[0].annotate(f"row {row:g}", (col, row), textcoords="offset points",
+                     xytext=(8, 9), fontsize=7, color=C_LINE, zorder=7,
+                     bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none"))
+
+pixel_axes(axes[1], SHAPE, "half to even: rows 0, 2, 2, 4")
+fill(axes[1], to_even, C_ND)
+for row in skipped_rows:
+    axes[1].add_patch(Rectangle((-0.5, row - 0.5), SHAPE_COLS, 1, facecolor="none",
+                                edgecolor=C_LINE, lw=1.6, ls=":", zorder=5))
+exact(axes[1], gap_start, gap_stop, color=INK)
+
+pixel_axes(axes[2], SHAPE, "half up: rows 1, 2, 3, 4")
+fill(axes[2], to_up, C_ND)
+exact(axes[2], gap_start, gap_stop, color=INK)
+
+fig.suptitle("dotted band: a row the line crosses and no pixel is drawn in",
+             y=1.03)
+fig.tight_layout()
+```
+
+The middle panel is not one line but three pieces — a lone pixel, an adjacent
+pair, and another lone pixel — separated by the two dotted rows. The right panel
+is the same segment with the ties resolved one fixed way instead of alternately,
+and it is a single connected chain.
+
+```{code-cell} ipython3
+from skimage.measure import label
+
+for name, pixels in (("half to even", to_even), ("half up", to_up)):
+    canvas = np.zeros(SHAPE, int)
+    for row, col in pixels:
+        canvas[row, col] = 1
+    print(f"   {name:<14}{label(canvas, connectivity=2).max()} connected "
+          f"component(s) for {len(pixels)} pixels")
+```
+
+The step of exactly 1 is doing real work in that argument, and it confines the
+whole problem to the axis with furthest to travel. Halve the spacing and the
+halves stop being consecutive: an integer-valued sample falls between them,
+rounds to itself, and anchors the chain.
+
+```{code-cell} ipython3
+print(f"{'samples on one axis':<44}{'rounded':<22}{'worst step':>11}")
+for label, seq in (
+    ("spacing 1, starting on a half", np.arange(0.5, 4.5, 1.0)),
+    ("spacing 1/2, starting on a half", np.arange(0.5, 3.0, 0.5)),
+    ("spacing 1, starting on an integer", np.arange(0.0, 4.0, 1.0)),
+    ("spacing 3/4, starting on a half", 0.5 + 0.75 * np.arange(5)),
+):
+    rounded = np.round(seq).astype(int)
+    print(f"   {label:<41}{str(rounded):<22}{np.abs(np.diff(rounded)).max():>11}")
+```
+
+Only the first row can gap, and it needs both a half fraction and a unit step.
+That pair of conditions is what `_round_safe` tests.
+
 Its test is `coords[0] % 1 == 0.5 and coords[1] - coords[0] == 1`. The first
 half is a **fractional part** of exactly `.5`, so it holds at any whole number
 and not only at `0.5`:
