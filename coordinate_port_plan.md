@@ -9,13 +9,29 @@ both test trees in a testable state.
 
 All file references are to `src/_skimage2` unless stated differently.
 
+Revised against the expanded `coordinate_review.md` (2726 lines, up from 209).
+The review adds a naming policy that changes the scope of Group A, settles D4
+and the `predict_x` replacement, adds `channel_axis=` and `plane_axis=` work,
+adds `_euler_rotation_matrix` to the angle list, and supplies a per-routine
+survey of 3-D capable functions.  Decision D7 records the naming policy and is
+the one to read first.
+
+One error found and fixed in the review: its `channel_axis` list attributed
+`profile_line` to `graph/_rag.py`, where it is `measure/profile.py`, and listed
+`show_rag` twice.  Everything else checked resolves — including the entries
+drawn from AI listings, and `skimage.segmentation.flood`, which is a real
+public alias for `morphology/_flood_fill.py::flood`.
+
 
 ## 1. Goal
 
 In SK2-API, a coordinate of length D always indexes the first D axes of the
 image array, in order.  No function reverses the order of the first two
-coordinates.  No parameter, return value, or docstring uses `x`, `y`, `row`, or
-`column` to name an image axis.
+coordinates.  Axes are named by position — `i, j, k` for indices, `I, J, K` for
+lengths, per decision D7 — so no parameter, return value, or docstring uses
+`x`, `y`, `row`, `column`, `plane`, `M` or `N` to name an image axis.  Where a
+function must treat one axis differently, a `channel_axis=` or `plane_axis=`
+keyword says which, and the docstring says that it is doing so.
 
 SK1-API (`src/skimage`) must keep its present behaviour, bit for bit.
 
@@ -63,7 +79,8 @@ different risk, and they must not be mixed in one pull request.
 ### Group A — names and signatures, no numbers change
 
 The code is already in array order.  Only parameters, return names, and prose
-are wrong.
+are wrong.  Decision D7 fixes the target vocabulary: `i, j, k` for indices,
+`I, J, K` for lengths.
 
 * `draw`: `r0, c0, r1, c1` -> `i0, j0, i1, j1`; `rr, cc` -> `ii, jj`
   (`draw/draw.py`, `draw/_draw.pyx`, `draw/_polygon2mask.py`,
@@ -73,6 +90,54 @@ are wrong.
   `feature/blob.py:103`, `feature/brief.py:166`, `feature/censure.py:179`).
 * `measure`: `find_contours`, `regionprops` prose, `profile_line`, `moments`.
 * `graph`, `segmentation`, `registration`, `morphology`, `util`: prose only.
+
+**A4. The shape-label sweep.**  Per D7, replace `(M, N)` with `(I, J)`, and
+`(P, M, N)` or `(L, M, N)` with `(I, J, K)`, across the docstrings.  The review
+enumerates roughly fifty modules; the ones marked there as "replace throughout"
+with no other change are pure sweep:
+
+`filters/_gabor.py`, `filters/_sparse.py`, `filters/morphsnakes.py`,
+`filters/edges.py`, `filters/lpi_filter.py`, `feature/corner.py`,
+`feature/_daisy.py`, `feature/haar.py`, `feature/_haar.pyx`,
+`feature/texture.py`, `measure/_colocalization.py`, `measure/_find_contours.py`,
+`measure/_pnpoly.pyx`, `measure/entropy.py`, `measure/pnpoly.py`,
+`morphology/convex_hull.py`, `restoration/deconvolution.py`,
+`segmentation/_chan_vese.py`, `segmentation/thresholding.py`,
+`segmentation/_quickshift_cy.pyx`, `segmentation/_felzenszalb_cy.pyx`,
+`util/compare.py`.
+
+The rest carry a per-routine plan in the review and are not mechanical.  This
+sweep touches no arithmetic, so it is the lowest-risk work in the port, but it
+is also the largest by line count.  Keep it out of the pull requests that change
+signatures: a reviewer reading a diff full of `(M, N)` to `(I, J)` will not see
+a signature change buried in it.
+
+**A5. `channel_axis=` where the channel axis is assumed last.**  Agreed on
+Zulip and in the meeting: always offer `channel_axis=` rather than assuming the
+last axis.  The review's list, as corrected, is seven functions in four files:
+
+| function | file, verified against the tree |
+| --- | --- |
+| `set_color` | `draw/draw.py:295` |
+| `profile_line` | `measure/profile.py:7` |
+| `show_rag` | `graph/_rag.py:463` |
+| `rag_mean_color` | `graph/_rag.py:310` |
+| `quickshift` | `segmentation/_quickshift.py:10` |
+| `active_contour` | `segmentation/active_contour_model.py:9` |
+| `mark_boundaries` | `segmentation/boundaries.py:189` |
+
+Every entry is checked against the tree, and each one has a real
+channel-axis-last assumption to remove: `profile_line` branches on
+`image.ndim == 3`, `show_rag` documents `(M, N[, 3])`, `rag_mean_color`
+documents `(M, N[, ..., P], 3)`.
+
+Group A only while the default reproduces today's behaviour.  If any of these
+would change output for a caller who does not pass the keyword, it moves to
+Group B.  Check each one; do not assume.
+
+**A6. `plane_axis=` where a plane axis is assumed.**  The same treatment for
+the functions the review's plane survey finds treating one of three axes
+specially.  Same caveat as A5 about defaults.
 
 Risk: low.  A reviewer can check these by reading.  A silent numeric change is
 not possible if the diff touches no arithmetic.
@@ -115,8 +180,18 @@ Separable, one pull request each:
 22. `EllipseModel` — `params` is `(xc, yc, a, b, theta)`
 23. `points_in_poly` (`measure/pnpoly.py:52`)
 24. `grid_points_in_poly`
-25. `LineModelND.predict_x` / `predict_y` (rename only; the model is N-D and
-    convention free)
+25. `LineModelND.predict_x` / `predict_y` — the model is N-D and convention
+    free, so no number changes; the review settles the replacement API at the
+    10 March meeting.  Deprecate both in favour of `predict`, with
+    `predict_x(y)` becoming `predict(y, from_axis=1)[:, 0]` and `predict_y(x)`
+    becoming `predict(x, from_axis=0)[:, 1]`.  Rename the existing
+    `predict(..., axis=)` argument to `from_axis=`.  `CircleModel.predict_xy`
+    and `EllipseModel.predict_xy` become `predict_coords`.
+    `predict` keeps returning the full coordinate array rather than only the
+    generated column: for `LineModelND` the output is N by D, and returning
+    only the new column would force the caller to reassemble it.
+    A GitHub search for `/\.predict_x\(/ AND skimage AND NOT path:skimage`
+    finds little outside use.
 26. `structure_tensor(order=)` (`feature/corner.py:72`)
 27. `hessian_matrix(order=)` and `_hessian_matrix_with_gaussian`
 28. `filters.rank.*` — `shift_x`, `shift_y`
@@ -136,7 +211,20 @@ scalar argument, and both are silent.
 * `swirl(rotation=)` — sign only; already radians, but undocumented
 * `AffineTransform(rotation=)`, `EuclideanTransform`, `SimilarityTransform`
 * `regionprops.orientation` (`measure/_regionprops.py:679`)
-* `draw.ellipse(rotation=)`, `draw.ellipse_perimeter(orientation=)`
+* `draw.ellipse(rotation=)`, `draw.ellipse_perimeter(orientation=)` — the
+  review works `ellipse_perimeter` out in full, and it is worth reading as the
+  worked example for the whole of Group C.  Today `orientation` is measured
+  **clockwise from the second (`j`) axis**; after the port it is
+  **anti-clockwise from the first (`i`) axis**.  Both the reference axis and
+  the direction change, and the two changes do not cancel.  The conversion for
+  a caller is a reflection, not a negation:
+
+      angle2 = np.pi / 2 - angle1
+
+  The docstring is also wrong today in a way that hides this: it says
+  "clockwise" without saying from which axis, so a reader assumes the usual
+  frame and gets a different ellipse.  Carry the equivalence into the porting
+  note, as the review drafts it.
 * `EllipseModel` `theta`
 * `hough_line` `theta`, `hough_ellipse` `orientation`
 * `filters.gabor(theta=)`, `gabor_kernel(theta=)`
@@ -150,10 +238,15 @@ scalar argument, and both are silent.
 These are API design decisions.  They are not implementation details.  Make
 them first, write them down, then implement.  Each one blocks a later stage.
 
-### D1. Letters for the axes — DECIDED: coordinates become tuples
+Read **D7 first**.  It is numbered last because it was decided last, but it
+sets the vocabulary the other six are written in, and it is the one that
+changes the size of the job.
+
+### D1. Arity of coordinate arguments — DECIDED: coordinates become tuples
 
 **Decision: fixed-arity functions take coordinate tuples, not one scalar per
-axis.**  Letters for the third and higher axes are then not needed, and the
+axis.**  D7 settles what the letters *are*; this settles how many arguments
+carry them.  Letters for the third and higher axes are then not needed, and the
 arity problem disappears with them.
 
 This finishes a conversion that `draw` has already half done.  Today the
@@ -218,6 +311,27 @@ decision is about arguments.
    that "first axis" means the first *spatial* axis when a `channel_axis` is
    given.  Dropping the letters does not drop that obligation.
 
+**Three more the review turns up.**
+
+* `filters/lpi_filter.py::LPIFilter2D` (line 39) takes an `impulse_response`
+  **callable** that must accept `r` and `c` as separate vectors, and
+  `filter_forward` (133), `filter_inverse` (173) and `wiener` (218) pass the
+  same contract through.  This is the
+  only place in the list where the coordinate convention is imposed on code the
+  *user* writes, so changing it breaks callables that no shim can adapt: we
+  would be changing what we pass to a function we do not own.  Either leave the
+  callback contract alone and relabel only the documentation, or change it and
+  accept that it is a hard break with a migration note.  Decide explicitly
+  rather than letting the sweep decide it.
+* `morphology/footprints.py::_cross(r0, r1)` names axis *lengths*, not a
+  coordinate, so it belongs to D7's relabelling and not here.
+* `measure/profile.py::profile_line(src, dst)` and
+  `flood(seed_point)` already take tuples.  They are cited in the review as the
+  pattern to converge on, not as work.  `flood` is defined in
+  `morphology/_flood_fill.py:129` but is also exported as
+  `skimage.segmentation.flood`, so the review's spelling of it is a valid
+  public path, not a mistake.
+
 **Cost.**  Under the rejected option (a), a shim could rewrite parameter names
 in the inherited docstring mechanically.  Under (b) the Parameters section
 changes shape, so each of the 13 shims must carry a hand-written docstring, as
@@ -271,11 +385,45 @@ between a wide silent change and a narrow one.
 needs a definition: which axis shears toward which.  Write the definition down
 before the flip.
 
-### D4. What replaces `order='rc'|'xy'`
+### D4. `order='rc'|'xy'` — DECIDED: remove it
 
 `structure_tensor` and `hessian_matrix` are the only functions with an explicit
-switch today.  In SK2-API there is one convention, so the parameter should go.
-Confirm that we remove it rather than keep it as `order='ij'`.
+switch today.  In SK2-API there is one convention, so the parameter goes; it is
+not kept as `order='ij'`.  Agreed on Zulip.
+
+Two further points from the review.
+
+**Make everything after `sigma` keyword-only** in both functions while the
+signature is open.
+
+**The two functions have very different exposure**, which the plan previously
+treated as one problem.  GitHub, excluding copies of the skimage test suite:
+
+| search | files |
+| --- | --- |
+| `/structure_tensor\(.*,.*["']xy["']/` | 6 |
+| `/hessian_matrix\(.*,.*["']xy["']/` | 41 |
+
+Five of the six `structure_tensor` hits are one author's repositories
+(`nematic`, `NematicTL`), and the sixth is a single project, so upstream pull
+requests could clear that side entirely.
+
+The review adds that "in neither case is the `order='xy'` case easy to pull out
+with a helper function".  **That is not so, and it matters, because forty-one
+files is otherwise a bleak prospect.**  An exact helper exists: run the whole
+computation in the transposed frame and transpose back, reversing `sigma` if it
+is a sequence.  Section 14.3 gives it, and `error_hessian_structure_tensor.Rmd`
+arrives at the same wrapper independently.  Measured on `coins`, it reproduces
+today's `order='xy'` to floating-point noise — relative `3e-16` — for both
+functions, for both `use_gaussian_derivatives` settings, for all five boundary
+modes, and for anisotropic `sigma`.
+
+What is *not* exact is the obvious shim, reversing the returned list.  For
+`hessian_matrix` with `use_gaussian_derivatives=True` it returns both diagonals
+exactly and gets the mixed element wrong by 20% to 38% of that element's range.
+That is presumably the helper the review had in mind.  So the `hessian_matrix`
+side is a shim problem after all, and a solvable one; see 14.3 for the code, the
+measurements, and the one decision it forces.
 
 ### D5. `shift_x` / `shift_y` in `filters.rank`
 
@@ -385,6 +533,165 @@ golden-ratio ordering is modulo a half turn, spelled `180`, which has to become
 The defaults change representation but not meaning, so a caller who never
 passed `theta` sees no difference.
 
+**Audit against the tree.**  Searched `src/_skimage2` for `deg2rad`, `rad2deg`,
+`np.degrees`, `np.radians`, `M_PI / 180`, `/ 180.`, the word "degree" in prose
+and comments, and numeric defaults on angle-shaped parameters.  The review's
+count is right: **seven sites take or return degrees at the API boundary, and
+no others.**  The audit also turns up three adjacent classes of problem that
+the radians pass should sweep up while it is in these files.
+
+*Genuine degrees, must change (the "six and a half"):*
+
+| site | what |
+| --- | --- |
+| `transform/_warps.py:363`, `:434` | `rotate(angle)`; docstring plus `np.deg2rad(angle)` |
+| `transform/radon_transform.py:27`, `:62`, `:102` | `radon(theta)` |
+| `transform/radon_transform.py:209`, `:259`, `:308` | `iradon(theta)` |
+| `transform/radon_transform.py:407`, `:490` | `iradon_sart(theta)` |
+| `transform/radon_transform.py:332`, `:357` | `order_angles_golden_ratio`, and `interval = 180` |
+| `transform/_radon_transform.pyx:35`, `:122` | `theta / 180. * M_PI` on entry to Cython |
+| `transform/_geometric.py:1783`–`1801` | `_euler_rotation_matrix(degrees=False)`, the half |
+
+*Prose says degrees where the code is radians.*  **Done — PR
+[#8329](https://github.com/scikit-image/scikit-image/pull/8329).**  No number
+was wrong; the documentation was.  These misled a reader into passing degrees,
+so they were worth more than a typo fix:
+
+* `transform/_geometric.py:946` — "to rotate by theta degrees clockwise",
+  immediately above a matrix written with `cos(theta)`, `sin(theta)`.
+* `transform/_warps_cy.pyx:81` — the same sentence, duplicated.
+* `draw/draw.py:70` — "so PI/2 degree means swap ellipse axis".  Also spells
+  counter-clockwise as "contra clock wise", and documents the range as
+  `(-PI, PI)` where line 124 computes `rotation %= np.pi`.  That last one is
+  imprecise rather than wrong: an ellipse is symmetric under a half turn, and
+  `rotation=-np.pi/4` and `rotation=3*np.pi/4` do give identical pixel sets.
+  Fix the wording, not the code.
+* `draw/draw.py:124` — the comment "allow just rotation with in range +/- 180
+  degree" over that same `%= np.pi`.
+* `feature/texture.py:224` — "angles [0 degrees, 90 degrees]" introducing an
+  example that passes `[0, np.pi/2]`.
+* `filters/_gabor.py:49`, `:154` — "If `theta = pi/2`, then the kernel is
+  rotated 90 degrees", mixing both units inside one sentence.
+
+*Units not stated at all.*  **Done — PR
+[#8329](https://github.com/scikit-image/scikit-image/pull/8329).**  Both are
+radians:
+
+* `measure/fit.py:739` — `EllipseModel.theta`, "Angle of first axis."
+* `transform/_warps.py:561` — `swirl(rotation)`, "Additional rotation applied
+  to the image."  The review already has this one.
+
+By contrast `measure/_regionprops.py:1356` does it properly — "ranging from
+:math:`-\pi/2` to :math:`\pi/2`" states the unit by stating the range.  Use it
+as the model for the other two.
+
+*Degrees internally, nothing crossing the boundary.*  Leave alone, but know
+they are there before grepping for `180`:
+
+* `feature/_hoghistogram.pyx:116`, `:131`, `:137`, `:138` — HOG bins gradient
+  orientation in degrees (`np.rad2deg(...) % 180`,
+  `180. / number_of_orientations`).  The public `orientations` argument is a
+  *count* of bins, so no angle in degrees reaches a caller.
+* `color/delta_e.py:260`–`344` — CIEDE2000 is specified in degrees, so the
+  `np.deg2rad` constants are the standard being implemented correctly.
+
+*Adjacent, not a units problem but found by the same search.*
+`transform/hough_transform.py:13` — `hough_line_peaks(min_angle=10)` is named
+for an angle and typed `int`, but the docstring says it is the "maximum filter
+size for second dimension of hough space": its unit is *bins*, so the angular
+separation it enforces depends on how many angles the caller passed.  Not part
+of D6, but it belongs in the same review pass as `min_distance`.
+
+**The wording half is already merged.**  PR
+[#8329](https://github.com/scikit-image/scikit-image/pull/8329), "DOC: note
+radians where missing, or incorrect", branch `not-degrees`, covers every site in
+the two documentation-only classes above: seven files, all docstrings and
+comments, no arithmetic.  So the remaining D6 work is exactly the seven
+degrees-at-the-boundary sites in the first table, and nothing else.
+
+Two things about that PR worth carrying forward.  It keeps the degrees gloss
+where it helps a reader — `_gabor.py` reads "rotated by pi/2 radians (90
+degrees)" rather than dropping the familiar figure — which is a better pattern
+than bare substitution for the rest of the port.  And it deliberately leaves
+"clockwise" alone in the two matrix docstrings, because the sense of rotation is
+D2's question, not D6's; do the same wherever the two meet.
+
+**One more, which the review counts as a half.**
+`transform/_geometric.py::_euler_rotation_matrix` carries a `degrees=False`
+keyword letting the caller opt into degrees.  Remove it.  It is private, it is
+a pass-through to `scipy.spatial.transform.Rotation.from_euler`, and a GitHub
+search for `/[ .]_euler_rotation_matrix\(/ AND NOT path:skimage` finds nobody
+calling it with `degrees=True`.  That makes the review's tally "six and a half
+exceptions" to the radians rule: `rotate`, `radon`, `iradon`, `iradon_sart`,
+`order_angles_golden_ratio`, `swirl` — documented wrongly rather than
+implemented wrongly — and this helper.  Standardising on radians throughout was
+agreed on Zulip.
+
+### D7. Axis labels in prose and names — DECIDED: `i, j, k` and `I, J, K`
+
+**Decision: axis-order labels everywhere they will serve; semantic labels only
+where the semantics are the point, and then behind a keyword argument.**
+
+This is the review's Policy section, and it sets the vocabulary the rest of this
+plan uses.
+
+**The convention.** Upper case for the *length* of an axis, lower case for an
+*index* into it. An array of two dimensions has shape `(I, J)`; `j` is a
+variable taking any value from `0` through `J - 1`. Refer to axes by their
+lower-case letter — the `i` axis, not the `I` axis.
+
+**Four rules, in order of application.**
+
+1. **Drop `M` and `N` as axis labels.** They are ambiguous in the current tree
+   and mean different things in neighbouring files. `rank.equalize` documents
+   `([P,] M, N)`, where `M` and `N` must mean row and column because `P` has
+   taken the plane; `watershed` documents `(M, N[, ...])`, where they can only
+   mean `i` and `j`. A reader cannot tell which is meant without opening the
+   source. Replace with `(I, J)`.
+
+2. **Replace "row" and "column" with `i` and `j`** wherever they can be read
+   strictly as axis order. The test the review sets is narrow: "row" survives
+   only if it *always* means the first axis in practice, and "column" only if it
+   always means the second. Otherwise both are semantic labels about how an
+   image is displayed, and display is the caller's choice.
+
+3. **Do not use "plane" at all.** Which axis is the plane is a field
+   convention, not a fact: MB's own field puts the plane last, skimage's
+   docstrings put it first. Use `i, j, k`, and where a function genuinely needs
+   to know, take a `plane_axis=` keyword.
+
+4. **Where semantics are unavoidable, say so.** State in the docstring that the
+   function treats an axis specially, that this is the exception, and put the
+   choice in a keyword argument — `channel_axis=` or `plane_axis=` — rather
+   than in a positional convention.
+
+**Why this is a decision and not a style note.** It changes what Group A
+*means*. Group A was "the code is already in array order, only the prose is
+wrong". Under D7 the prose target is `i, j`, not `row, col`, so the Group A
+renames already listed — `r0, c0, r1, c1` to `i0, j0, i1, j1`, `rr, cc` to
+`ii, jj` — are the general rule rather than a `draw`-module choice. It also adds
+a large mechanical sweep that was not previously in scope: Section 3 Group A now
+carries the `(M, N)` to `(I, J)` conversion across roughly fifty modules.
+
+**What it does not change.** Return values still index arrays, so `line` still
+returns a tuple of index arrays and `img[ii, jj]` still works. D1 stands: fixed
+arity functions take coordinate tuples. D7 governs what the letters *are*, D1
+governs how many arguments carry them.
+
+**Open point.** The review proposes phrasing for a channel axis but does not
+settle it:
+
+```rest
+image : 3D array, representing 2D image, with channel axis, e.g (I, J, C)
+    Use the `channel_axis` parameter to specify the array axis corresponding
+    to color channels.
+```
+
+`C` is a semantic label by rule 3's own argument. It is defensible here because
+the keyword names the axis, so `C` labels a length rather than asserting a
+position — but the wording needs one pass before the sweep starts, because the
+sweep will replicate whatever it says across fifty modules.
+
 ## 5. Mechanism
 
 ### 5.1 The main rule
@@ -484,6 +791,17 @@ These rules make each pull request easy to review and hard to get wrong.
    output in examples.
 6. **Keep `test_public_skimage_api` green.**  The frozen SK1 API snapshot must
    not move.
+7. **Use transpose invariance to decide whether an axis is special.**  The
+   review's tool for the plane survey, and it settles by measurement a question
+   that is otherwise settled by reading and guessing.  For a 3-D input `img`,
+   run `res = func(img)`; then run `res_t = func(img.transpose(ordering))` for
+   some `ordering` other than `(0, 1, 2)` and un-transpose with
+   `np.argsort(ordering)`.  If the two agree, the function treats no axis
+   differently, so it needs neither `plane_axis=` nor a semantic label. If they
+   disagree, the function has a convention buried in it and needs a plan.
+   `slic_3d_axes.ipynb` and `ridges_3d_axes.ipynb` in the review are worked
+   examples.  Record the result per function; a "no" is as useful as a "yes",
+   because it closes the question.
 
 
 ## 7. Stages
@@ -513,9 +831,27 @@ No numbers change in any of these.
 1.2 `feature` keypoints, blobs, and descriptors.
 1.3 `measure` prose: `find_contours`, `regionprops`, `moments`, `profile_line`.
 1.4 `graph`, `segmentation`, `registration`, `morphology`, `util` prose.
-1.5 `CONTRIBUTING.rst` and `doc/source/user_guide/numpy_images.rst`, which
-    currently teach `plane, row, column` (see `planes.md` for the full list of
-    places).
+1.5 `CONTRIBUTING.rst` and `doc/source/user_guide/numpy_images.rst`.  The
+    review names both edits exactly.  In `CONTRIBUTING.rst`, the line
+
+    > Refer to array dimensions as (plane), row, column, not as x, y, z.
+
+    contradicts D7 and has to go, along with the coordinate-conventions
+    section it points at in the user guide, which teaches plane conventions.
+    Also change
+
+    > use ``image : ndarray of shape (M, N)`` and then refer to ``M`` and ``N``
+
+    to `(I, J)`, referring to `I` and `J`.  Do this **before** the sweep in
+    1.6, not after: it is the document contributors are pointed at, and while
+    it still says `(M, N)` the sweep is undoing advice the project is giving.
+1.6 The `(M, N)` to `(I, J)` shape-label sweep, per Group A item A4.  Roughly
+    fifty modules.  Split by subpackage so no single pull request is
+    unreviewable, and keep every one of them free of signature changes.
+1.7 Add `channel_axis=` to the six functions in A5 that assume the channel axis
+    is last, and `plane_axis=` per A6.  Confirm for each that the default
+    reproduces current behaviour; any that does not belongs in Group B and
+    comes out of Stage 1.
 
 ### Stage 2 — remove the existing convention switch
 
@@ -581,12 +917,18 @@ they fail loudly if the adapter is wrong.
 Only after Stage 4 lands, because an angle has no meaning until the frame is
 fixed.  Apply decision D2.
 
+The documentation-only part of this stage is already done, in PR
+[#8329](https://github.com/scikit-image/scikit-image/pull/8329).  That covers
+5.1a's "document that `rotation` is in radians", the `EllipseModel.theta` half
+of 5.3, and all of 5.5 — those items are now sign-and-frame work only.  Rebase
+on it rather than re-editing the same docstrings.
+
 5.1 `rotate`: the direction, per D2, and degrees to radians, per D6. Also the
     `rotation` parameter of the matrix transforms. One migration guide entry
     must cover both changes, because a reader who fixes only one is still
     wrong.
-5.1a `swirl`: document that `rotation` is in radians, and decide the direction
-    question of D2. No numeric change.
+5.1a `swirl`: the direction question of D2. No numeric change. The "document
+    that `rotation` is in radians" half is done in #8329.
 5.2 `regionprops.orientation`.
 5.3 `draw.ellipse` and `draw.ellipse_perimeter`; `EllipseModel.theta`.
 5.4 `hough_line`, `hough_ellipse`, `warp_polar`.
@@ -595,7 +937,8 @@ fixed.  Apply decision D2.
     defaults, the two `np.deg2rad` calls, the `interval = 180` in the angle
     ordering, and the two `theta / 180. * M_PI` conversions inside
     `_radon_transform.pyx`. See the table in D6.
-5.5 `filters.gabor` and `gabor_kernel`.
+5.5 `filters.gabor` and `gabor_kernel`. Wording done in #8329; check whether
+    anything beyond wording is needed once the frame is fixed.
 
 ### Stage 6 — close out
 
@@ -1376,6 +1719,45 @@ def hessian_matrix(image, sigma=1, mode='constant', cval=0, order='rc',
 The transposed shim matches today's `order='xy'` to 5e-17 in the interior and,
 unlike the reversal, is also right at the border.
 
+`on_hessian.md` section 12 carries this shim as running code, with the
+per-element measurements below reproduced there against the notebook's own test
+image.  `error_hessian_structure_tensor.Rmd` reaches the same wrapper from a
+different direction, which is worth knowing: it was derived there from a Gemini
+analysis rather than from the border argument above, so the two are
+independent.
+Measured on `coins`, 303x384 and asymmetric, the transposed shim reproduces
+`order='xy'` at floating-point noise across the whole parameter space that
+matters:
+
+| varied | result |
+| --- | --- |
+| `hessian_matrix`, `use_gaussian_derivatives=True` | rel 3.2e-16 |
+| `hessian_matrix`, `use_gaussian_derivatives=False` | rel 1.4e-14 |
+| all five `mode` values, both settings | no mode worse than 1.4e-14 |
+| `structure_tensor`, three modes | rel 3.5e-16 |
+| anisotropic `sigma=(3, 4)` | as above; the sequence must be reversed |
+
+The reversal shim over the same image fails in a specific place, which is
+worth stating exactly because the aggregate figure hides it.  The two diagonals
+are reproduced **exactly** — reversing the list simply swaps `Hrr` and `Hcc` —
+and all the error lands on the mixed element:
+
+| sigma | `Hxx` | `Hxy` | `Hyy` |
+| --- | --- | --- | --- |
+| 1 | 0 | 19.7% | 0 |
+| 3 | 0 | 38.1% | 0 |
+| (3, 4) | 0 | 38.0% | 0 |
+
+as a fraction of each element's own range.  Measured against the overall
+maximum, which the diagonals dominate, the same errors read as a milder 12% to
+18%; that is the wrong denominator for deciding whether a shim is usable.
+
+For `use_gaussian_derivatives=False` the reversal is exactly 0 on every
+element, because the `np.gradient` path applies no per-call boundary extension
+and so is already transpose-equivariant.  That is the whole difference between
+the two shims in one line: only the two-call Gaussian path needs the transpose,
+and within it only the mixed element.
+
 **A decision this forces.**  The transposed shim gives the *correct* mixed
 partial, which is not what SK1 returns today at the border.  Either accept that
 SK1 output changes there and call it a bug fix in the release notes, or keep a
@@ -1390,8 +1772,99 @@ old values are wrong by up to half the signal.
 with one spike at the centre, which is symmetric under transpose, at
 `sigma=0.1`, where `truncate=100` drives the kernel to underflow.  It passes
 for both `use_gaussian_derivatives` values whatever the shim does.  Every new
-test must use a **non-square, asymmetric, seeded random image**, **sigma >= 1**,
-and must look at the **border**, not only the interior.
+test must use a **non-square, asymmetric** image, **sigma >= 1**, and must look
+at the **border**, not only the interior.
+
+**Two thirds of the obvious test matrix has no discriminating power.**  This is
+the lesson from `error_hessian_structure_tensor.Rmd`, and it is worth stating
+before any test is written, because a suite can look thorough and still pass a
+shim that is wrong.
+
+* **The diagonals cannot catch the wrong *shim*.**  Both candidate shims
+  reproduce `Hrr` and `Hcc` exactly — reversing the list just swaps them, and
+  transposing recovers them — so all the error from choosing the reversal lands
+  on the **mixed element**.  A test that asserts on the maximum over all three
+  is dominated by two that are exactly right, and is close to blind.  **Assert
+  on the mixed element by name.**
+
+  The diagonals do still earn their place, for a different failure: they are
+  what catches an unreversed `sigma`, which throws every element out by 87% or
+  more.  So assert on all three, but do not let the aggregate stand in for the
+  mixed one.
+* **`use_gaussian_derivatives=False` cannot fail either.**  That path is
+  `gaussian` then `np.gradient`, with no per-call boundary extension, so it is
+  already transpose-equivariant and even the naive reversal is exact on every
+  element.  It is a useful negative control and it is worthless as a test of
+  the shim.  The teeth are entirely in `use_gaussian_derivatives=True`.
+* **`structure_tensor` cannot fail** for the same reason, per 14.1.
+
+So the whole discriminating power of the suite sits in one cell of the matrix:
+`hessian_matrix`, `use_gaussian_derivatives=True`, mixed element, at the border.
+Write that test first and make sure it fails against a reversal shim before
+trusting anything else.
+
+```python
+import numpy as np
+import pytest
+from numpy.testing import assert_allclose
+
+import skimage as ski
+from skimage.feature import hessian_matrix
+
+
+def _fixtures():
+    """Non-square and asymmetric: a photograph and a random array."""
+    yield "coins", ski.util.img_as_float(ski.data.coins())        # 303 x 384
+    yield "random", np.random.default_rng(7).random((60, 70))
+
+
+@pytest.mark.parametrize("name,image", list(_fixtures()))
+@pytest.mark.parametrize("mode", ["constant", "reflect", "nearest", "wrap", "mirror"])
+@pytest.mark.parametrize("sigma", [1.0, 3.0, (1.0, 2.5)])
+def test_xy_shim_reproduces_sk1(name, image, mode, sigma):
+    """The `order='xy'` shim must match SK1 element for element."""
+    got = hessian_matrix(image, sigma=sigma, mode=mode, order="xy",
+                         use_gaussian_derivatives=True)
+    want = _frozen_sk1_xy(name, mode, sigma)      # from the .npz of item 1
+    for element_got, element_want in zip(got, want):
+        assert_allclose(element_got, element_want, rtol=1e-12)
+
+
+def test_reversal_shim_would_fail():
+    """Guard the guard: the naive shim must not pass the test above.
+
+    If this ever stops failing, the fixture has lost its teeth — most likely
+    because someone made the image square, symmetric, or the sigma tiny.
+    """
+    image = np.random.default_rng(7).random((60, 70))
+    kwargs = dict(sigma=3.0, mode="nearest", use_gaussian_derivatives=True)
+    xy = hessian_matrix(image, order="xy", **kwargs)
+    reversed_rc = hessian_matrix(image, order="rc", **kwargs)[::-1]
+    # The diagonals match under either shim; only the mixed element separates
+    # a correct shim from a wrong one.
+    assert_allclose(xy[0], reversed_rc[0], rtol=1e-12)
+    assert_allclose(xy[2], reversed_rc[2], rtol=1e-12)
+    mixed_error = np.max(np.abs(xy[1] - reversed_rc[1])) / np.max(np.abs(xy[1]))
+    assert mixed_error > 0.1
+```
+
+Numbers to expect, measured on this tree at `sigma=(1.0, 2.5)`,
+`mode='nearest'`, `use_gaussian_derivatives=True`, as a fraction of each
+element's own range:
+
+| shim | image | `Hxx` | `Hxy` | `Hyy` |
+| --- | --- | --- | --- | --- |
+| transpose, `sigma` reversed | `coins` | 3e-16 | 5e-16 | 3e-16 |
+| transpose, `sigma` reversed | random 60x70 | 3e-16 | 4e-16 | 3e-16 |
+| reverse the list | `coins` | 0 | **23%** | 0 |
+| reverse the list | random 60x70 | 0 | **50%** | 0 |
+| transpose, `sigma` **not** reversed | `coins` | 516% | 89% | 87% |
+| transpose, `sigma` **not** reversed | random 60x70 | 624% | 103% | 89% |
+
+The two fixtures are both listed because the gap between them is the point: on
+a photograph the reversal shim is 23% wrong, on uniform random data 50%. A
+fixture with smooth borders flatters a bad shim, so keep both, and set any
+threshold against the photograph rather than the random array.
 
 1. **Characterisation.**  Before removing `order=`, freeze today's `order='xy'`
    output for a small parameter matrix into an `.npz` under
@@ -1403,28 +1876,93 @@ and must look at the **border**, not only the interior.
    make exact comparison flaky across platforms.  Record the border values of
    the Gaussian path as the *corrected* ones, per the decision in 14.3.
 2. **Sequence sigma.**  `sigma=(1.0, 2.5)` on a non-square image, `order='xy'`.
-   This is the single test most likely to catch a wrong transposed shim:
-   forgetting to reverse `sigma` does not raise, it changes results by 7% to
-   17%.
-3. **Guards, now owned by the shim.**  `order='xy'` with 3-D input raises
+   Forgetting to reverse `sigma` inside the transposed shim does not raise, and
+   it is not a subtle numeric drift: measured per element it is **87% to 624%**
+   of each element's own range, because every axis is then smoothed at the
+   other axis's width.  Unlike the reversal, this one shows up on the diagonals
+   too, so the two failures are distinguishable from the assertion that fires.  Easy to omit when writing the shim, impossible to miss
+   once one anisotropic case is in the suite — which is exactly why one must be.
+3. **Boundary modes.**  All five of `constant`, `reflect`, `nearest`, `wrap`
+   and `mirror`.  The whole defect is a boundary phenomenon, so a suite that
+   only exercises the default is testing the interior.  The transposed shim is
+   exact in all five; a shim that special-cases one is wrong.
+4. **Guards, now owned by the shim.**  `order='xy'` with 3-D input raises
    `ValueError` with the old message; an unrecognised `order` raises
    `ValueError` with the old message.  Both functions.  `_skimage2` no longer
    raises these.
-4. **Structure.**  Return type is a `list`; length is `(n**2 + n) / 2`; element
+5. **Structure.**  Return type is a `list`; length is `(n**2 + n) / 2`; element
    shapes match the input, so a stray transpose fails loudly on a non-square
    image; `float32` input gives `float32` elements, and the transpose does not
    upcast.
-5. **N-D pass-through.**  For 3-D and 4-D input, `order='rc'` and the default
+6. **N-D pass-through.**  For 3-D and 4-D input, `order='rc'` and the default
    give identical results, element for element.
-6. **Warning.**  `use_gaussian_derivatives=None` still raises exactly one
+7. **Warning.**  `use_gaussian_derivatives=None` still raises exactly one
    `FutureWarning` with the old message, and its `stacklevel` still points at
    the caller.  The shim adds a frame; use the existing
    `_shared/utils.py::_warning_stacklevel` machinery.
-7. **Invariance of the consumers.**  `structure_tensor_eigenvalues` and
+8. **Invariance of the consumers.**  `structure_tensor_eigenvalues` and
    `hessian_matrix_eigvals` return the same values for `rc` and `xy` element
    order, because reversing the elements conjugates the tensor by a swap and
    eigenvalues are invariant.  A cheap property test.
-8. **Internal callers.**  `corner_harris`, `corner_shi_tomasi`,
+9. **Internal callers.**  `corner_harris`, `corner_shi_tomasi`,
    `corner_foerstner`, `shape_index` and `feature/censure.py` all pass
    `order='rc'` today.  Dropping the argument at those call sites is
    mechanical; their existing tests are the net.  Confirm they are untouched.
+
+## 15. The 3-D plane survey
+
+The review's longest section walks the code base for functions that accept 3-D
+input and might treat one axis as the "plane".  It is a survey with a plan per
+routine, and it is the part of the review this plan can most easily lose track
+of, because most entries look like docstring work and a few are not.
+
+**How to read it.**  Each entry is one of three kinds.
+
+1. **Pure relabelling** — "replace `(M, N)` with `(I, J)` throughout".  These
+   are Group A item A4, already listed in Section 3.  No decision needed.
+2. **A semantic axis to expose** — the function does treat one axis specially,
+   so it needs `channel_axis=` or `plane_axis=` and a docstring saying so.
+   Group A while the default preserves behaviour, Group B otherwise.
+3. **A convention buried in the arithmetic** — rarer, and the only kind that
+   can change numbers silently.
+
+Apply the transpose-invariance check of Section 6 rule 7 to sort kind 2 from
+kind 3.  It answers the question the survey is asking, and it answers it by
+measurement.
+
+**Entries with a plan of their own**, beyond the relabelling sweep:
+
+`draw/draw3d.py::ellipsoid`; `draw/draw.py::rectangle`, `set_color`;
+`filters/rank/*::_core_3D` and the percentile variants
+(`autolevel_percentile`, `gradient_percentile`, `mean_percentile`);
+`filters/lpi_filter.py`; `filters/ridges.py`; `feature/_hog.py::hog`;
+`feature/peak.py::_prominent_peaks`; `feature/template.py::match_template`;
+`graph/_rag.py::rag_mean_color`, `show_rag`; `io/_io.py::imsave`;
+`measure/_ccomp.pyx`; `measure/_marching_cubes_lewiner.py::marching_cubes`;
+`measure/_regionprops.py::regionprops` and `regionprops_table`;
+`measure/_regionprops_utils.py::euler_number`; `measure/profile.py::profile_line`;
+`morphology/_skeletonize.py::skeletonize`;
+`registration/_optical_flow.py::optical_flow_tvl1`, `optical_flow_ilk`;
+`restoration/deconvolution.py::richardson_lucy`;
+`restoration/_denoise.py::denoise_bilateral`, `denoise_wavelet`;
+`restoration/non_local_means.py::denoise_nl_means`;
+`segmentation/boundaries.py::mark_boundaries`;
+`segmentation/random_walker_segmentation.py::random_walker`;
+`segmentation/_watershed.py::watershed`;
+`segmentation/slic_superpixels.py::slic`;
+`segmentation/active_contour_model.py::active_contour`;
+`segmentation/_quickshift.py::quickshift`;
+`segmentation/_felzenszalb.py::felzenszalb`;
+`util/unique.py::unique_rows`.
+
+That is about thirty routines.  They do not form a stage: each belongs to
+whichever group its own plan puts it in, and several are already listed in
+Section 3 under A5.  What they need from this plan is a tracker, so that the
+sweep in Stage 1.6 does not quietly absorb the ones that are not sweeps.
+
+**Suggested handling.**  Before Stage 1.6 begins, run the transpose check over
+the thirty and record the verdict against each in a table in this document.
+That converts the survey from prose into a checklist, costs an afternoon, and
+prevents the one outcome that matters: a function of kind 3 going through a
+docstring-only pull request with its arithmetic untouched and its convention
+still wrong.
