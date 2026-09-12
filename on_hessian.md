@@ -5,7 +5,7 @@ jupytext:
     extension: .md
     format_name: myst
     format_version: 0.13
-    jupytext_version: 1.19.1
+    jupytext_version: 1.19.5
 kernelspec:
   name: python3
   display_name: Python 3 (ipykernel)
@@ -223,17 +223,193 @@ for sigma, a, b in zip(sigmas, finite, gaussian_deriv):
 
 Above `sigma = 1` the Gaussian-derivative route is exact to the precision of
 the test — the measured error is zero, which is why the curve below rests on an
-imposed floor — while finite differences stay wrong by a few percent however much the
-image is smoothed. Below about `sigma = 0.85` they swap places, and the
-Gaussian route degrades sharply: its kernels are then narrower than a pixel and
-badly sampled. That is the aliasing the docstring warns about when it advises
-against a `sigma` much less than 1, and it is what the `truncate = 100` line in
-the source is defending against.
+imposed floor — while finite differences stay wrong by a few percent however
+much the image is smoothed. Below about `sigma = 0.85` they swap places, and
+the Gaussian route degrades sharply: its kernels are then narrower than a pixel
+and badly sampled. That is the **aliasing** the docstring warns about when it
+advises against a `sigma` much less than 1. The next subsection says what that
+word means here, what the source's `truncate = 100` line does about it, and why
+that choice forces enormous image padding later.
 
-Two things about this crossover are revisited later. The aliasing is repairable
-in the kernel rather than inherent to the method, which is Fix C; and the
+Two further points are revisited with the fixes. The aliasing is repairable in
+the kernel rather than inherent to the method, which is Fix C; and the
 crossover itself moves with the test image, because `blob` is very smooth and
 that flatters finite differences more than a textured image would.
+
++++
+
+### Aliasing, `truncate = 100`, and padding
+
+SciPy builds each Gaussian-derivative FIR by **sampling the continuous formula
+on the integer grid** and truncating at radius
+`L = int(truncate * sigma + 0.5)`. Call each coefficient a *tap* (standard FIR
+jargon; see
+[Wikipedia: Finite impulse response](https://en.wikipedia.org/wiki/Finite_impulse_response)).
+For a second derivative the continuous shape is
+`g(x) * (x**2 - sigma**2) / sigma**4` with `g` a normalised Gaussian.
+
+```{code-cell} ipython3
+def gaussian_taps(sigma, order, trunc):
+    """The 1-D kernel `gaussian_filter` builds, from the explicit formula."""
+    lw = int(trunc * sigma + 0.5)
+    x = np.arange(-lw, lw + 1).astype(float)
+    g = np.exp(-(x**2) / (2 * sigma**2))
+    g /= g.sum()
+    if order == 0:
+        return x, g
+    if order == 1:
+        return x, g * (x / sigma**2)
+    return x, g * ((x**2 - sigma**2) / sigma**4)
+```
+
+A faithful discrete second derivative must annihilate constants and reproduce
+quadratics: `sum(k) == 0` and `sum(k * x**2) / 2 == 1`. Sampling breaks both
+once `sigma` drops below about one pixel, and **widening the support does not
+repair them**.
+
+```{code-cell} ipython3
+print("order=2 moments; want sum = 0 and sum k*x**2/2 = 1")
+print(f"{'sigma':>7}{'truncate':>10}{'n taps':>8}{'sum':>12}{'sum k*x**2/2':>14}")
+for sigma in (0.5, 0.7, 1.0):
+    for trunc in (8, 100):
+        x, k = gaussian_taps(sigma, 2, trunc)
+        print(f"{sigma:>7}{trunc:>10}{k.size:>8}"
+              f"{k.sum():>12.2e}{(k * x**2).sum() / 2:>14.4f}")
+```
+
+**Why call that aliasing.** The continuous second derivative of a Gaussian has
+Fourier transform proportional to `-ω² exp(-σ² ω² / 2)`. Small `sigma` spreads
+that spectrum past the Nyquist frequency `π` (one cycle per two pixels).
+Sampling on the integers folds the out-of-band energy back into
+`[-π, π]`, so the discrete taps are not the continuous operator restricted to
+the grid. The Gaussian is not band-limited; higher derivative order widens the
+spectrum further, which is why a first-derivative kernel survives sampling
+better than a second-derivative one (an odd kernel still sums to zero by
+symmetry; an even one need not).
+
+The visible symptoms are exactly the failed moments: a non-zero sum is a
+**DC leak** (flat brightness reads as curvature), and a wrong second moment is
+**gain error**. Those are properties of the few central taps. At
+`sigma = 0.5` essentially all the mass sits in `x ∈ {-1, 0, 1}` whether
+`truncate` is 8 or 100 — the table above is the measurement.
+
+**What `truncate = 100` is, and what it was for.** The source sets it in
+`feature/corner.py`, with a comment that gives the reasoning in full:
+
+```python
+    # For small sigma, the SciPy Gaussian filter suffers from aliasing and edge
+    # artifacts, given that the filter will approximate a sinc or sinc
+    # derivative which only goes to 0 very slowly (order 1/n**2). Thus, we use
+    # a much larger truncate value to reduce any edge artifacts.
+    truncate = 8 if all(s > 1 for s in sigma) else 100
+```
+
+The diagnosis in the first clause is right: at small `sigma` there is aliasing.
+The remedy follows from the second clause, and that is where it goes wrong. The
+argument is that the kernel decays like a sinc, as `1/n**2`, so a window of
+ordinary width would chop off tails that still carry weight — hence a window
+twelve times wider.
+
+A sampled Gaussian derivative does not decay like a sinc. It decays like a
+Gaussian.
+
+```{code-cell} ipython3
+x_far, k_far = gaussian_taps(0.5, 2, 100)
+peak = np.abs(k_far).max()
+centre = k_far.size // 2
+
+print("sigma = 0.5, truncate = 100: how fast do the taps really fall off?")
+print(f"{'n':>4}{'|k[n]| / peak':>16}{'1/n**2, as the comment assumes':>33}")
+for n in (1, 2, 3, 4, 8):
+    print(f"{n:>4}{abs(k_far[centre + n]) / peak:>16.2e}{1.0 / n**2:>33.2e}")
+
+beyond = np.abs(k_far[np.abs(x_far) > 4]).sum() / np.abs(k_far).sum()
+print(f"\nof {k_far.size} taps, those beyond |n| > 4 hold {beyond:.1e} of the "
+      f"total absolute weight")
+```
+
+At `n = 8` the real coefficient is fifty-two orders of magnitude below what a
+`1/n**2` tail would be. The 92 extra taps that `truncate = 100` buys at
+`sigma = 0.5` carry `2e-20` of the kernel's weight between them. They are not
+small-but-helpful; they are zero.
+
+So the guard cannot work, and measurement confirms it does not — neither on the
+moments nor on the filtered output:
+
+```{code-cell} ipython3
+noise = np.random.default_rng(7).random((60, 70))
+
+print("same filter, two truncate values")
+print(f"{'sigma':>7}{'d(sum)':>12}{'d(second moment)':>20}"
+      f"{'max |output difference|':>26}")
+for sigma in (0.5, 0.7, 1.0, 1.5):
+    x8, k8 = gaussian_taps(sigma, 2, 8)
+    x100, k100 = gaussian_taps(sigma, 2, 100)
+    d_sum = abs(k8.sum() - k100.sum())
+    d_m2 = abs((k8 * x8**2).sum() - (k100 * x100**2).sum())
+    narrow = ndi.gaussian_filter(noise, sigma, order=[2, 0], mode="nearest",
+                                 truncate=8)
+    wide = ndi.gaussian_filter(noise, sigma, order=[2, 0], mode="nearest",
+                               truncate=100)
+    print(f"{sigma:>7}{d_sum:>12.1e}{d_m2:>20.1e}"
+          f"{np.abs(narrow - wide).max():>26.1e}")
+```
+
+Where the guard is active and the aliasing is real — `sigma` of 0.5 and 0.7 —
+the two kernels are bit-identical and so is the output. Above that the widest
+disagreement anywhere is `7e-16`, floating-point noise. `truncate = 100` is not
+a weak remedy for the aliasing, it is not a remedy at all: the problem is in the
+few central taps, and no width of window fixes a tap that is already present and
+wrong.
+
+What it does do is cost. That is the rest of this subsection.
+
+```{code-cell} ipython3
+fig, axes = plt.subplots(1, 2, figsize=(9.0, 2.8), sharey=True)
+for ax, trunc in zip(axes, (8, 100)):
+    x, k = gaussian_taps(0.5, 2, trunc)
+    ax.axhline(0, color=GRID, lw=0.8)
+    ax.vlines(x, 0, k, color=C_ONE, lw=1.0)
+    ax.plot(x, k, "o", color=C_ONE, ms=3)
+    ax.set_xlim(-8 if trunc == 8 else -20, 8 if trunc == 8 else 20)
+    ax.set_title(f"sigma = 0.5, truncate = {trunc}  "
+                 f"({k.size} taps, sum = {k.sum():+.3f})")
+    ax.set_xlabel("pixels from centre", fontsize=8, color=MUTED)
+    ax.tick_params(labelsize=8, colors=MUTED)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+fig.suptitle("same central taps; the extra width is nearly empty", y=1.04)
+fig.tight_layout()
+```
+
+**How that forces padding.** Convolution support is set by the FIR radius
+`L = int(truncate * sigma + 0.5)`. Any pad-once reference, and Fix B later, must
+clear that radius or the crop still feels the border, and the radius is twelve
+times larger than it needs to be wherever the guard is active.
+
+```{code-cell} ipython3
+print(f"{'sigma':>7}{'guard active?':>15}{'radius used':>14}"
+      f"{'radius without the guard':>27}")
+for sigma in (0.5, 1.0, 1.01, 3.0, 5.0):
+    active = not (sigma > 1)                     # the source's own test
+    truncate = 100 if active else 8
+    print(f"{sigma:>7}{('yes' if active else 'no'):>15}"
+          f"{int(truncate * sigma + 0.5):>14}{int(8 * sigma + 0.5):>27}")
+```
+
+At `sigma = 1`, where the guard is still on, it asks for a 100-pixel radius in
+place of 8. That is the whole of the excess: a pad-once reference at that scale
+needs a margin of about a hundred pixels rather than a dozen. The ridge-filter
+comparison in section 9 pays it, and so does Fix B.
+
+The guard is also why the numbers jump at `sigma = 1.01`: the test is
+`all(s > 1 for s in sigma)`, so a hair above one the radius falls from 100 to 8
+and everything downstream gets cheaper at a stroke.
+
+The real repair is to **impose the discrete moments after sampling** (Fix C).
+Once that is done, `truncate = 8` and `truncate = 100` agree, and the padding
+shrinks with the support. Until then, treat `truncate = 100` as a historical
+guard whose main measurable effect in this notebook is cost, not accuracy.
 
 +++
 
@@ -446,8 +622,23 @@ Separability is innocent.
 ### The two calls
 
 `_hessian_matrix_with_gaussian` never asks for a second derivative directly. It
-asks for a **first** derivative twice, in two separate calls to
-`ndi.gaussian_filter`, each at `sigma / sqrt(2)`:
+asks for a **first** derivative twice, and the source says why, immediately
+above the loop:
+
+```python
+    # Apply two successive first order Gaussian derivative operations, as
+    # detailed in:
+    # https://dsp.stackexchange.com/questions/78280/are-scipy-second-order-gaussian-derivatives-correct
+```
+
+That page is the second-derivative aliasing of section 3, reported by someone
+who met it in practice. The workaround is sound as far as it goes: a
+first-derivative kernel is odd, so it sums to zero by symmetry however coarsely
+it is sampled, and composing two of them never asks SciPy for the even kernel
+that leaks. The subsection on other libraries returns to what else that page
+contains.
+
+What it costs is this section. Two calls, each at `sigma / sqrt(2)`:
 
 1. **One call per axis, on the image.** `order=[1, 0]` gives `d/dr` of the
    smoothed image and `order=[0, 1]` gives `d/dc`. For a 2-D image that is two
@@ -565,10 +756,11 @@ one hundred pixels rather than the forty a `truncate = 8` kernel would need.
 Both are easy to get wrong, and either one on its own produces a difference that
 has nothing to do with the defect.
 
-That `truncate = 100` is the first of several appearances. It is a guard against
-aliasing at small `sigma`, and it turns up again as a cost in Fix B, as the
-reason Fix A is slow at `sigma = 0.5`, and finally in Fix C, which removes the
-reason for it.
+That `truncate = 100` is the first of several appearances after section 3. It is
+the small-`sigma` FIR-width guard described there: it does not repair the failed
+moments, but it does force every pad-once construction to clear a ~100-pixel
+margin. It turns up again as a cost in Fix B, as the reason Fix A is slow at
+`sigma = 0.5`, and finally in Fix C, which removes the reason for keeping it.
 
 ```{code-cell} ipython3
 photo = ski.util.img_as_float(ski.data.camera())[::2, ::2]
@@ -755,37 +947,19 @@ it sums to `-0.56`, so the operator responds to absolute brightness: a flat
 bright region reads as strongly curved, and the reported curvature depends on
 what you added to the image rather than on its shape.
 
-In what follows we use the term "tap" for a kernel coefficient (AKA kernel
-weight) - see [Wikipedia: Finite impulse
-response](https://en.wikipedia.org/wiki/Finite_impulse_response).
+Those are the failed moments from section 3 — the same aliasing, now felt as a
+defect of Fix A rather than of the shipped two-call route. The second moment is
+wrong at the same time; both fail together because the continuous kernel varies
+faster than the grid can follow.
 
 ```{code-cell} ipython3
-def gaussian_taps(sigma, order, trunc):
-    """The 1-D kernel `gaussian_filter` builds, from the explicit formula."""
-    lw = int(trunc * sigma + 0.5)
-    x = np.arange(-lw, lw + 1).astype(float)
-    g = np.exp(-(x**2) / (2 * sigma**2))
-    g /= g.sum()
-    if order == 0:
-        return x, g
-    if order == 1:
-        return x, g * (x / sigma**2)
-    return x, g * ((x**2 - sigma**2) / sigma**4)
-
-
-print("moments of the order=2 kernel; a second derivative needs sum 0 and "
-      "sum k*x**2/2 = 1")
+print("moments of the order=2 kernel (truncate as shipped); "
+      "need sum 0 and sum k*x**2/2 = 1")
 print(f"{'sigma':>7}{'sum':>14}{'sum k*x**2/2':>16}")
 for sigma in (0.4, 0.5, 0.7, 1.0, 1.5):
     x, k = gaussian_taps(sigma, 2, 8 if sigma > 1 else 100)
     print(f"{sigma:>7}{k.sum():>14.2e}{(k * x**2).sum() / 2:>16.4f}")
 ```
-
-Both moments are wrong together, and both are wrong for the same reason: at
-`sigma = 0.5` the kernel varies faster than the sampling grid can follow, so the
-discrete sum stops matching the integral it stands for. That is aliasing, named
-precisely — and naming it that precisely is what makes it repairable, which is
-Fix C.
 
 **It is not slower.** Six one-dimensional passes replace ten, against kernels
 `sqrt(2)` wider.
@@ -815,8 +989,8 @@ for sigma in (0.5, 1.0, 1.5, 3.0, 6.0):
 ```
 
 It is faster from `sigma = 1` upwards, and slower at `sigma = 0.5` only because
-the `truncate = 100` hack then makes the full-sigma kernel the wider one. That
-hack is not a fixed cost of the method: Fix C shows it is unnecessary, and
+the `truncate = 100` guard then makes the full-sigma kernel the wider one.
+That width is not required by Fix A itself: Fix C shows the guard can go, and
 removing it turns this row around.
 
 **It generalises to N dimensions unchanged.** The `order` vector carries a 2 on
@@ -915,17 +1089,18 @@ for sigma in (0.5, 1.0, 1.5, 3.0):
 ```
 
 The cost is modest above `sigma = 1`. Below it the function sets
-`truncate = 100` to fight aliasing, and the padding has to clear that, so it
-becomes enormous — 143 pixels at `sigma = 1`. Fix C removes the reason for that
-hack, which removes most of this cost with it.
+`truncate = 100`, and the padding has to clear that support, so the margin
+becomes enormous — 143 pixels at `sigma = 1`. That width is the aliasing guard
+from section 3, not a moment fix; Fix C removes the reason for keeping the
+guard, which removes most of this cost with it.
 
 +++
 
 ### Fix C: correct the kernel, so Fix A works at every scale
 
-Fix A's only weakness is the small-`sigma` aliasing measured above, and that
-weakness is stated as two failed moment conditions. A discrete second-derivative
-operator has to annihilate constants and reproduce quadratics:
+Fix A's only weakness is the small-`sigma` aliasing of section 3, stated there
+as two failed moment conditions. A discrete second-derivative operator has to
+annihilate constants and reproduce quadratics:
 
 ```
     sum(k)             ==  0        no response to a constant
@@ -959,7 +1134,7 @@ Spreading it evenly is correct at a sane kernel width and fails at
 the operator, an even correction lays a wide plateau under a one-pixel
 derivative. Spreading it along `g` is insensitive to the window, which is why
 this notebook uses it — but that robustness is only needed because of the
-`truncate` hack, and the subsection on other libraries returns to the point.
+`truncate = 100` guard, and the subsection on other libraries returns to the point.
 
 ```{code-cell} ipython3
 def flat_corrected_taps(sigma, order, trunc=8):
@@ -981,7 +1156,7 @@ def with_taps(taps_of, image, sigma, mode=MODE, trunc=8):
 
 print(f"{'sigma':>7}{'taps':>7}{'corrected along g':>20}{'corrected flat':>17}")
 for sigma in (0.5, 0.7, 1.0):
-    trunc = 8 if sigma > 1 else 100          # the hack, as shipped
+    trunc = 8 if sigma > 1 else 100          # shipped guard, not a moment fix
     n = 2 * int(trunc * sigma + 0.5) + 1
     along = relative_error(
         with_taps(corrected_taps, blob, sigma, mode="nearest", trunc=trunc), sigma)
@@ -1118,7 +1293,7 @@ guarantee is untouched.
 
 ```{code-cell} ipython3
 def fix_c(image, sigma, mode=MODE, trunc=8, order="rc"):
-    """Fix A, with the corrected kernels and no `truncate` hack."""
+    """Fix A, with the corrected kernels and no `truncate = 100` guard."""
     taps = {o: corrected_taps(sigma, o, trunc)[1] for o in (0, 1, 2)}
 
     def sep(first, second):
@@ -1192,9 +1367,10 @@ for sigma in (0.4, 0.5, 0.7, 1.0, 1.5, 3.0):
           f"{abs(fix_c(const, sigma)[0][20, 20]):>25.1e}")
 ```
 
-**And `truncate = 100` becomes unnecessary.** That hack exists to fight the
-aliasing by brute-force margin; correcting the kernel removes the reason for it,
-and `truncate = 8` then gives the same answer as `truncate = 100` to the digit.
+**And `truncate = 100` becomes unnecessary.** Section 3 showed that the wide
+support does not repair the sampled moments; correcting the kernel does, and
+then `truncate = 8` matches `truncate = 100` to the digit. The padding cost
+tied to the guard goes with it.
 
 ```{code-cell} ipython3
 print(f"{'sigma':>6}{'Fix C, truncate=8':>20}{'Fix C, truncate=100':>22}")
@@ -1403,8 +1579,8 @@ Two conclusions follow, and the second is the one that matters. A port of the
 DIPlib or VIGRA code into `skimage` that copied it faithfully would break, and
 the reason would be `truncate = 100` rather than anything in either library. But
 the better response is not to reshape the correction: it is to stop building a
-101-tap kernel for a one-pixel operator. Fix C already drops the `truncate`
-hack on accuracy grounds, and once it is gone the plain mean subtraction that
+101-tap kernel for a one-pixel operator. Fix C already drops the `truncate = 100`
+guard on accuracy grounds, and once it is gone the plain mean subtraction that
 two shipping libraries use is correct here too. The along-`g` form is then a
 belt-and-braces choice rather than a necessity — worth keeping because it costs
 nothing and removes a dependency between two parts of the function that ought
@@ -1684,15 +1860,16 @@ because the ridge filters happen to start at `sigma = 1`.
 
 B reaches the same border numbers by paying for them — it leaves the ordering
 inconsistency in place, needs a 143-pixel padded copy at `sigma = 1`, and keeps
-the `truncate = 100` hack that makes the padding that large.
+the `truncate = 100` guard that makes the padding that large.
 
 That `truncate = 100` line is worth restating, because it is referred to at
-every stage above and only Fix C settles it. The hack was fighting the aliasing
-by brute-force margin, and it is the single largest cost in the function at
-`sigma <= 1`: it is what makes Fix B's padding 143 pixels wide, and what makes
+every stage above and only Fix C settles it. The line is a wide-FIR guard aimed
+at small-`sigma` aliasing and edge artifacts (section 3); it does not restore
+the discrete moments, and it is the single largest cost in the function at
+`sigma <= 1`. It is what makes Fix B's padding 143 pixels wide, and what makes
 Fix A slower than the shipped code at `sigma = 0.5`. Correcting the kernel
-removes the reason for it, which is why A + C is twenty times faster than the
-shipped code at `sigma = 1` rather than merely a little faster.
+removes the reason for keeping that width, which is why A + C is twenty times
+faster than the shipped code at `sigma = 1` rather than merely a little faster.
 
 Here is what users would see change.
 
@@ -1745,7 +1922,7 @@ print(f"  {'order=xy against order=rc':<44}removed entirely")
 print(f"  {'response to a constant image':<44}-0.56 -> 1e-16 at sigma = 0.5")
 print(f"  {'scale selection':<44}unbiased from blob width 1 upwards")
 print(f"  {'cost at sigma = 1':<44}about 0.05x")
-print(f"  {'truncate = 100 hack':<44}no longer needed")
+print(f"  {'truncate = 100 guard':<44}no longer needed")
 ```
 
 The border band changes by design, because it is currently wrong. The interior

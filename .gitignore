@@ -13,3 +13,6 @@ _build/
 .jupyter_cache/
 .scratch/
 .skimage-wheels/
+
+# Local link to the pyenv env (see `make kernel`)
+.venv

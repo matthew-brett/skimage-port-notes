@@ -24,6 +24,11 @@ exclude_patterns:
   - .main/**
   # Notebooks are the paired .md; the .ipynb would be a duplicate document.
   - "**.ipynb"
+  # A gitignored virtualenv in the source directory. Sphinx walks into it and
+  # collects package README and licence files as documents, which fails
+  # --warningiserror. Incremental builds hide this; a clean build does not.
+  - .venv
+  - .venv/**
   - README.md
   - AGENTS.md
   - instructions

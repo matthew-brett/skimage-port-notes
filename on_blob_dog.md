@@ -387,6 +387,151 @@ and 19 — the odd sizes whose `s3` is even. So the centring defect is two
 separate parity conditions on top of the indexing shift, and a fix that
 addresses only the indexing still mis-centres a third of the odd scales.
 
+### Constraints on `size`
+
+The filter is built from two widths that share one integer `size`:
+
+```
+size = int(3 * sigma)     # mid box width (also the filter's nominal width)
+s3   = size // 3          # side / lobe width
+s2   = (size - 1) // 2    # mid starts at c - s2
+```
+
+On the line of columns through the centre pixel `c`, each box is a half-open
+interval of pixels. **Centred** means the interval contains `c` and the same
+number of pixels on each side of `c`.
+
+```
+mid  :  [c - s2,  c - s2 + size)     width = size
+side :  [c - s3 // 2,  c - s3 // 2 + s3)     width = s3
+```
+
+A half-open interval of odd length always has a unique middle pixel; one of
+even length never does. That is the whole constraint, applied twice.
+
+```{code-cell} ipython3
+def draw_box_row(ax, start, width, centre, label, colour, y=0.0):
+    """One horizontal box on a 1-D pixel strip; shade pixels it covers."""
+    xs = np.arange(centre - 8, centre + 9)
+    for x in xs:
+        face = colour if start <= x < start + width else "#f0eee8"
+        ax.add_patch(plt.Rectangle((x - 0.5, y - 0.35), 1.0, 0.7,
+                                   facecolor=face, edgecolor=GRID, lw=0.6))
+    ax.axvline(centre, color=INK, lw=1.0, ls=":", zorder=3)
+    ax.text(centre - 8.6, y, label, ha="right", va="center", fontsize=8,
+            color=MUTED)
+    covered = [x for x in xs if start <= x < start + width]
+    left = covered[0] - centre if covered else None
+    right = covered[-1] - centre if covered else None
+    note = (f"[{start - centre:+d}, {start + width - centre:+d})"
+            f"  →  {left:+d} … {right:+d}" if covered else "empty")
+    ax.text(centre + 8.6, y, note, ha="left", va="center", fontsize=7,
+            color=MUTED, family="monospace")
+
+
+def panel_boxes(ax, size, title):
+    s2, s3 = (size - 1) // 2, size // 3
+    c = 0
+    draw_box_row(ax, c - s2, size, c, f"mid  size={size}", C_ONE, y=0.8)
+    draw_box_row(ax, c - s3 // 2, s3, c, f"side s3={s3}", C_TWO, y=0.0)
+    mid_ok = size % 2 == 1
+    side_ok = s3 % 2 == 1
+    ax.set_xlim(-9.5, 12.5)
+    ax.set_ylim(-0.7, 1.4)
+    ax.set_aspect("equal")
+    bare(ax, title)
+    verdict = ("both centred" if mid_ok and side_ok
+               else "mid off" if not mid_ok and side_ok
+               else "side off" if mid_ok and not side_ok
+               else "both off")
+    ax.text(0, -0.55, verdict, ha="center", va="top", fontsize=8,
+            color=C_THREE if mid_ok and side_ok else C_TWO)
+
+
+fig, axes = plt.subplots(2, 2, figsize=(9.2, 3.6))
+for ax, size, title in zip(
+        axes.ravel(),
+        (8, 9, 7, 5),
+        ("even size: mid cannot straddle c",
+         "size=9, s3=3: both odd → centred",
+         "size=7 ≡ 1 (mod 6): s3 even → side off",
+         "size=5 ≡ 5 (mod 6): both odd → centred")):
+    panel_boxes(ax, size, title)
+fig.suptitle("which pixels mid and side cover, relative to the centre c", y=1.02)
+fig.tight_layout()
+```
+
+Read each strip from the colon at `c`. An odd-width box paints the same count of
+cells left and right of that line; an even-width box always has one extra cell
+on one side. For `size = 8` the mid box is the even case. For `size = 7`, mid is
+fine (`7` is odd) but `s3 = 2` is even, so the side lobe sits half a pixel off —
+that is the residual asymmetry after D1.
+
+Every odd integer is congruent to `1`, `3` or `5` modulo 6. Only those three
+classes need checking, because even `size` already fails the mid condition.
+
+```{code-cell} ipython3
+# size = 6k+r. For odd size, r ∈ {1, 3, 5}.
+print(f"{'size':>5}{'mod 6':>7}{'s3':>5}{'s3 =':>14}{'s3 odd?':>9}{'centred?':>10}")
+for size in range(3, 25):
+    if size % 2 == 0:
+        continue
+    r = size % 6
+    s3 = size // 3
+    # Algebra: (6k+1)//3 = 2k even; (6k+3)//3 = 2k+1 odd; (6k+5)//3 = 2k+1 odd.
+    form = {1: "2k (even)", 3: "2k+1 (odd)", 5: "2k+1 (odd)"}[r]
+    ok = s3 % 2 == 1
+    print(f"{size:>5}{r:>7}{s3:>5}{form:>14}{('yes' if ok else 'no'):>9}"
+          f"{('yes' if ok else 'NO'):>10}")
+```
+
+So:
+
+| residue of `size` mod 6 | examples | `size` odd? | `s3` odd? | usable? |
+| --- | --- | --- | --- | --- |
+| `0, 2, 4` | 6, 8, 10 | no | — | no (mid off) |
+| `1` | 7, 13, 19 | yes | no | no (side off) |
+| `3` | 3, 9, 15, 21 | yes | yes | yes |
+| `5` | 5, 11, 17, 23 | yes | yes | yes |
+
+"**Not `1 mod 6`**" is the short name for the last two rows together: odd sizes
+whose remainder on division by 6 is `3` or `5`. SURF's own ladder
+`9, 15, 21, 27, …` is the stricter subset with residue `3` only (and step 6).
+
+```{code-cell} ipython3
+fig, ax = plt.subplots(figsize=(9.0, 1.8))
+for size in range(3, 28):
+    r = size % 6
+    if size % 2 == 0:
+        colour, tag = GRID, "even"
+    elif r == 1:
+        colour, tag = C_TWO, "1 mod 6"
+    else:
+        colour, tag = C_THREE, "valid"
+    ax.add_patch(plt.Rectangle((size - 0.4, 0), 0.8, 1.0,
+                               facecolor=colour, edgecolor="white", lw=0.5))
+    ax.text(size, 0.5, str(size), ha="center", va="center", fontsize=7,
+            color="white" if colour != GRID else MUTED)
+ax.set_xlim(2.3, 27.7)
+ax.set_ylim(-0.2, 1.6)
+ax.set_yticks([])
+ax.set_xticks([])
+for spine in ax.spines.values():
+    spine.set_visible(False)
+ax.plot([], [], color=C_THREE, lw=6, label="valid (3 or 5 mod 6)")
+ax.plot([], [], color=C_TWO, lw=6, label="odd but 1 mod 6 — side off")
+ax.plot([], [], color=GRID, lw=6, label="even — mid off")
+ax.legend(frameon=False, fontsize=7, loc="upper center",
+          bbox_to_anchor=(0.5, 1.35), ncol=3)
+ax.set_xlabel("size = int(3 · sigma)", fontsize=8, color=MUTED)
+fig.tight_layout()
+```
+
+The dead `size += 1` line only moves even sizes into the odd column. It turns
+`8 → 9` (good) but also leaves `7` untouched, and would turn `6 → 7` (still
+bad). A D2 fix has to land in the green set above, not merely in the odd
+integers.
+
 ```{code-cell} ipython3
 DETECTORS = {"blob_dog": lambda im: blob_dog(im, min_sigma=2, max_sigma=30,
                                              threshold=0.05),
@@ -666,6 +811,72 @@ def clamped_box(r, c, rl, cl, shape):
     return (r0, c0), (r1 - r0, c1 - c0)
 
 
+def draw_integ_edge(ax, shape, request, title):
+    """Requested rectangle vs what `_integ` actually sums after clip-then-extent."""
+    rows, cols = shape
+    r, c, rl, cl = request
+    (r0, c0), (h, w) = clamped_box(r, c, rl, cl, shape)
+
+    # Image pixels.
+    for i in range(rows):
+        for j in range(cols):
+            ax.add_patch(plt.Rectangle(
+                (j - 0.5, i - 0.5), 1, 1,
+                facecolor="#f0eee8", edgecolor=GRID, lw=0.7))
+
+    # Requested box (may leave the image).
+    ax.add_patch(plt.Rectangle(
+        (c - 0.5, r - 0.5), cl, rl,
+        fill=False, edgecolor=C_TWO, lw=2.0, ls="--", zorder=3,
+        label="requested"))
+    # Actual summed region.
+    if h > 0 and w > 0:
+        ax.add_patch(plt.Rectangle(
+            (c0 - 0.5, r0 - 0.5), w, h,
+            facecolor=C_ONE, alpha=0.45, edgecolor=C_ONE, lw=1.8, zorder=2,
+            label="actually summed"))
+
+    ax.set_xlim(-2.5, cols + 1.5)
+    ax.set_ylim(rows + 1.5, -2.5)          # array order: row 0 at the top
+    ax.set_aspect("equal")
+    ax.set_xticks(range(cols))
+    ax.set_yticks(range(rows))
+    ax.tick_params(labelsize=7, colors=MUTED)
+    for spine in ax.spines.values():
+        spine.set_color(GRID)
+    ax.set_title(title, fontsize=8)
+
+    # Annotate the clip arithmetic on the vertical axis of this request.
+    ax.annotate(
+        f"ask [{r}, {r + rl}) → integ [{r0}, {r0 + h})",
+        xy=(cols / 2 - 0.5, -1.6), ha="center", va="top",
+        fontsize=7, color=MUTED, family="monospace")
+
+
+# Toy geometry: a 5×4 box on an 8×8 image, overhanging by two pixels.
+SHAPE = (8, 8)
+BOX = (5, 4)                               # (rl, cl)
+fig, axes = plt.subplots(1, 2, figsize=(8.4, 4.0))
+draw_integ_edge(
+    axes[0], SHAPE, (-2, 2, *BOX),
+    "top: origin clips, extent kept → slid inward")
+draw_integ_edge(
+    axes[1], SHAPE, (5, 2, *BOX),
+    "bottom: origin stays, extent clips → shrunk")
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(handles, labels, frameon=False, fontsize=8,
+           loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.02))
+fig.suptitle("`_integ` on the same 5×4 request, opposite edges", y=1.08)
+fig.tight_layout()
+```
+
+The dashed outline is what the filter asked for; the filled region is what the
+four-corner sum actually covers. On the top, clipping the origin to 0 and then
+adding `rl` slides a full-size box into the image. On the bottom, the origin is
+already legal, so `r + rl` hits the far bound and the height collapses. Left
+and right edges behave the same way as top and bottom, on columns.
+
+```{code-cell} ipython3
 sigma = 4.0
 size = int(3 * sigma)
 s2, s3 = (size - 1) // 2, size // 3
@@ -887,8 +1098,9 @@ prerequisite for testing D2, because while every box is displaced by a pixel
 there is no clean centre to measure parity against.
 
 **D2 needs a decision, not just a patch.** Both `size` and `size // 3` must be
-odd, and the smallest fix is to round `size` up to the next value satisfying
-both — `size ∈ {3, 5, 9, 11, 15, 17, 21, 23, …}`, i.e. odd and not `1 mod 6`.
+odd — see *Constraints on `size`* above for the geometry and the residue table.
+The smallest fix is to round `size` up to the next value satisfying both —
+`size ∈ {3, 5, 9, 11, 15, 17, 21, 23, …}`, i.e. odd and not `1 mod 6`.
 That coarsens the scale axis further, which interacts with D3: recalibrating the
 size-to-sigma constant and constraining the realisable sizes are the same
 conversation, and doing them in one change is cheaper than doing them twice.
