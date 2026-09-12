@@ -1407,7 +1407,10 @@ Everything the continuous operator had beyond Nyquist is folded back and added
 in. Folding is many-to-one. No choice of coefficients can separate what was
 added, because the samples no longer carry it. If the operator you want has
 energy above `pi` — and `-w**2 exp(-s**2 w**2 / 2)` always does — then no FIR on
-this grid is that operator.
+this grid is that operator. The black curve in the figure below is the
+*unperiodised* continuous `Ghat` on `[0, pi]`, drawn as a reference for what
+you would want if nothing folded. The achievable discrete ideal is the
+periodised sum above, not that curve.
 
 **What the two conditions actually constrain is `H` at `w = 0`.** For an even
 kernel `H(w) = sum(k[n] cos(w n))`, so
@@ -1435,7 +1438,7 @@ for ax, sigma in zip(axes, (0.5, 1.5)):
     ideal = -(omega**2) * np.exp(-(sigma**2) * omega**2 / 2)
     x_raw, k_raw = gaussian_taps(sigma, 2, 8)
     x_fix, k_fix = corrected_taps(sigma, 2, 8)
-    ax.plot(omega, ideal, color=INK, lw=2.4, label="ideal, continuous")
+    ax.plot(omega, ideal, color=INK, lw=2.4, label="continuous Ghat (no fold)")
     ax.plot(omega, transfer(x_raw, k_raw, omega), color=C_TWO, lw=1.8,
             label="sampled")
     ax.plot(omega, transfer(x_fix, k_fix, omega), color=C_ONE, lw=1.8, ls="--",
@@ -1498,18 +1501,19 @@ agreement with a near-zero target is not an error, and dividing by that target
 would report it as one.
 
 That is why the correction works so well in practice, and why the earlier
-accuracy tables look the way they do. A Gaussian-smoothed image is meant to have its content at
-low frequency; that is what the smoothing is for. Correcting the operator where
-the signal lives buys most of the available accuracy. The residual only bites
-for content near Nyquist — which is exactly the pattern of the sinusoid table
-later in Fix C, where the corrected kernel is 0.07% wrong at a 40-pixel
-wavelength and 7.8% wrong at 4 pixels.
+accuracy tables look the way they do. A Gaussian-smoothed image is meant to have
+its content at low frequency; that is what the smoothing is for. Correcting the
+operator where the signal lives buys most of the available accuracy. The
+residual only bites for content near Nyquist — which is exactly the pattern of
+the sinusoid table above, where the corrected kernel is 0.07% wrong at a
+40-pixel wavelength and 7.8% wrong at 4 pixels.
 
-It also explains the one regime Fix C cannot rescue. At `sigma = 0.4` the
+It also explains the regime where Fix C helps least. At `sigma = 0.4` the
 smoothing barely attenuates anything, so a real image still has substantial
-energy near Nyquist, where the operator is still wrong however well its moments
-are set. No kernel repair fixes that; only a larger `sigma`, or a different
-grid, does.
+energy near Nyquist, where the operator remains wrong however well its moments
+are set. Moment repair still removes the DC leak and restores low-frequency
+gain — both unconditional wins — but it cannot restore the operator near
+Nyquist. Only a larger `sigma`, or a different grid, does that.
 
 +++
 
