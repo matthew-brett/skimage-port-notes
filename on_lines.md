@@ -5,7 +5,7 @@ jupytext:
     extension: .md
     format_name: myst
     format_version: 0.13
-    jupytext_version: 1.19.1
+    jupytext_version: 1.19.5
 kernelspec:
   name: python3
   display_name: Python 3 (ipykernel)
@@ -143,16 +143,18 @@ instead samples the line at even intervals and rounds each sample to a pixel.
 They agree about most segments and disagree about some, which is what this
 notebook is about.
 
-Here is the segment from `(0, 0)` to `(1, 4)`, with the pixels it passes
-through at all.
+Here is the segment from `(0, 0)` to `(1, 4)`, with the pixels whose squares
+the ideal segment intersects.
 
 ```{code-cell} ipython3
 p, q = (0, 0), (1, 4)
 shape = (3, 6)
+# Pixel squares centred on integer indices: the segment meets these six.
+touches = {(0, 0), (0, 1), (0, 2), (1, 2), (1, 3), (1, 4)}
 
 fig, ax = plt.subplots(figsize=(3.6, 2.0))
 pixel_axes(ax, shape)
-fill(ax, {(0, j) for j in range(5)} | {(1, j) for j in range(5)}, C_OFF)
+fill(ax, touches, C_OFF)
 exact(ax, p, q)
 ax.set_title("the segment (0, 0) to (1, 4) and the pixels it touches")
 fig.tight_layout()
@@ -234,8 +236,9 @@ guarantee is that this stays within
 ```
 
 which is to say the drawn pixel is always the nearest one, with an exact tie
-resolved by taking the lower. The half-open end of that interval *is* the
-tie-breaking rule of section 4, written as mathematics.
+resolved by stepping early — taking the higher minor coordinate, so the gap
+lands on `-1/2` rather than `+1/2`. The half-open end of that interval *is*
+the tie-breaking rule of section 4, written as mathematics.
 
 +++
 
@@ -360,8 +363,8 @@ print(f"identical to skimage.draw.line on {matches}/{len(all_pairs)} pairs"
 Three claims were made above without proof. Each is a statement about every
 iteration of every line, so each can be tested as one.
 
-The first is that the drawn pixel is always the nearest, ties going low — the
-interval `[-1/2, +1/2)`.
+The first is that the drawn pixel is always the nearest, ties stepping early —
+the interval `[-1/2, +1/2)`.
 
 ```{code-cell} ipython3
 def discrepancies(start, stop):
@@ -696,10 +699,12 @@ for spacing in (1.0, 0.999999, 0.5, 2.0):
 ```
 
 Both conditions have to hold. The spacing is exactly 1 only on the axis with
-furthest to travel, and a fractional part of `.5` needs a non-integer endpoint.
-Integer endpoints therefore never reach the guard, which can be checked without
-touching the private function at all: if the guard never fires, `line_nd` is
-exactly `np.round` of its own samples.
+furthest to travel. Integer endpoints can still put a *mid-run* sample on a
+half — column 2 of `(0, 0)` to `(1, 4)` is exactly row `0.5` — but the guard
+only inspects `coords[0]`, the first sample, which is then an integer. So the
+first half of the test fails, the guard never fires, and `line_nd` is exactly
+`np.round` of its own samples. That can be checked without touching the
+private function at all.
 
 ```{code-cell} ipython3
 def plain_round(start, stop):
@@ -917,7 +922,7 @@ fig.tight_layout(rect=(0, 0.08, 1, 1))
 
 The disagreements are not scattered: they lie along the directions whose slope
 puts a sample exactly on a half. Over **every** integer endpoint pair in a
-13x13 box, not just those from one corner:
+9x9 box, not just those from one corner:
 
 ```{code-cell} ipython3
 # Every ordered pair of endpoints in a 9x9 box, kept clear of the canvas edge
@@ -933,7 +938,7 @@ print(f"{len(box)} endpoint pairs, {diff} differ  ({diff / len(box):.1%})")
 wide = range(-6, 7)
 wide_pairs = [((a, b), (c, d)) for a, b, c, d in itertools.product(wide, repeat=4)]
 wdiff = sum(sk_line(a, b) != sk_nd(a, b) for a, b in wide_pairs)
-print(f"{len(wide_pairs)} pairs in a wider box, {wdiff} differ  ({wdiff / len(wide_pairs):.1%})")
+print(f"{len(wide_pairs)} pairs in a 13x13 box, {wdiff} differ  ({wdiff / len(wide_pairs):.1%})")
 ```
 
 ## 6. Two symmetries, one each
@@ -1726,7 +1731,7 @@ guarantees:
 | Output | integer indices | integers, or floats with `integer=False` |
 | Arithmetic | exact integer | floating point |
 | Translation invariant | **yes** | no |
-| Reversal symmetric | no | **yes** |
+| Reversal symmetric | no | **yes**, for integer endpoints |
 
 The float endpoints are not a convenience that Bresenham could absorb. Integer
 arithmetic needs integer deltas, so a float segment has to be rounded first,
@@ -2144,15 +2149,16 @@ fig.tight_layout()
 | Reversal symmetric | no | **yes**, for integer endpoints | no | **yes** |
 | Translation invariant | **yes** | no | **yes** | **yes** |
 
-One non-antialiased algorithm underlies all three libraries. `skimage.draw.line`
-and Pillow agree pixel for pixel; OpenCV agrees too, for the endpoints ordered
-so the column decreases. The differences in the table are tie-breaking and
-endpoint order, not method.
+One non-antialiased 8-connected algorithm underlies `skimage.draw.line`, Pillow,
+and OpenCV's `LINE_8`. `skimage.draw.line` and Pillow agree pixel for pixel;
+OpenCV's `LINE_8` agrees too, for the endpoints ordered so the column
+decreases. The differences in the table are tie-breaking and endpoint order,
+not method. OpenCV's `LINE_4` is a second rasteriser, covered in section 8.
 
 Anti-aliasing is where they actually diverge, and section 7 measures that:
 `line_aa` follows Zingl, OpenCV filters with a Gaussian and touches a wider
 skirt, and Pillow does not anti-alias lines at all.
 
-Measured with Pillow 12.2.0 and OpenCV 5.0.0, over integer endpoints only, for
+Measured with Pillow 12.3.0 and OpenCV 5.0.0, over integer endpoints only, for
 segments up to about twelve pixels long. `line_aa` is compared only for
 coverage, not for the endpoint treatment it would want alongside `line`.
