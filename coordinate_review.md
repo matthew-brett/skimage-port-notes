@@ -428,7 +428,7 @@ We have the same pattern in (at least):
 * `draw/draw.py::bezier_curve`:
 
   ```python
-  def bezier_curve(r0, c0, r1, c1, r2, c2, weight, shape=None):`
+  def bezier_curve(r0, c0, r1, c1, r2, c2, weight, shape=None):
       ...
   ```
 
@@ -2451,7 +2451,33 @@ Output specification for `H` in `hough_circle`: edit for M, N etc.
   `/structure_tensor\(.*,.*["']xy["']/  AND NOT path:test_corner.py`
   (to avoid copies of the Skimage test suite).  Five are within `nematic` and
   `NematicTL` repos by `viciya`; one is in a project repo
-  `tiagopetena/computer_vision`.  These could be resolved by suitable PRs.  But `/hessian_matrix\(.*,.*["']xy["']/  AND NOT path:test_corner.py` occurs in 41 files, so that would be some work to resolve with PRs.  In neither case is the `order='xy'` case easy to pull out with a helper function.
+  `tiagopetena/computer_vision`.  These could be resolved by suitable PRs.  But `/hessian_matrix\(.*,.*["']xy["']/  AND NOT path:test_corner.py` occurs in 41 files, so that would be some work to resolve with PRs.
+
+  In fact the `order='xy'` case *can* be pulled out with a helper, exactly.  Run
+  the computation in the transposed frame and transpose the results back,
+  reversing `sigma` when it is a sequence — the wrapper in
+  `error_hessian_structure_tensor.Rmd`:
+
+  ```python
+  def get_xy_from_rc(func, image, **kwargs):
+      if 'sigma' in kwargs and not np.isscalar(kwargs['sigma']):
+          kwargs['sigma'] = tuple(kwargs['sigma'])[::-1]
+      res_rc = func(np.transpose(image), order='rc', **kwargs)
+      return [np.transpose(h) for h in res_rc]
+  ```
+
+  Measured on `coins` (303 x 384, asymmetric), this reproduces today's
+  `order='xy'` to floating-point noise — relative error 3e-16 — for
+  `hessian_matrix` and `structure_tensor`, for both `use_gaussian_derivatives`
+  settings, for all five `mode` values, and for anisotropic `sigma`.
+
+  What is *not* exact is the obvious helper, reversing the returned element
+  list.  For `hessian_matrix` with `use_gaussian_derivatives=True` the two
+  diagonals still come back exactly — reversing just swaps them — but the mixed
+  element is out by 20% to 38% of its own range, because the two-call scheme
+  re-extends the boundary per call and so is not transpose-equivariant.  For
+  `use_gaussian_derivatives=False`, and for `structure_tensor`, reversing the
+  list *is* exact on every element.
 
   See [Discussion on Zulip](https://skimage.zulipchat.com/#narrow/channel/181448-development/topic/Coordinate.20review.20for.20skimage2/near/580440609) and Gemini analysis in `./ai_output/gemini_hessian_structure_tensor.md`.
 
@@ -2482,8 +2508,10 @@ Output specification for `H` in `hough_circle`: edit for M, N etc.
   ```
 
   However, reversing arguments like this can give substantially different
-  answers for `hessian_matrix` (but not `structure_tensor`); see
-  `./error_hessian_structure_tensor.ipynb`.
+  answers for `hessian_matrix` (but not `structure_tensor`).  The two diagonals
+  survive the reversal exactly, because it only swaps them; the mixed element
+  does not, and is out by 20% to 38% of its own range on `coins`.  See section
+  12 of `on_hessian.md`, which measures this and gives an exact alternative.
 
   Alternatively (**check**), use porting function to do transformation:
 
