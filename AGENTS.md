@@ -3,6 +3,8 @@
 - Never open a PR automatically, always offer to make a PR, if a PR is
   something sensible to do for the given task.
 - Prefer ASD-STE100 Simplified Technical English
+- Unless specifically asked, do not Git-stage changes, and do not make
+  commits.
 
 ## Code style
 
