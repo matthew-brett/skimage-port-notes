@@ -1493,3 +1493,102 @@ diagnosed.
 
 `blob_doh` always takes the approximate path, so it is untouched by A + C in
 either direction.
+
+## 12. Reproducing `order='xy'` exactly
+
+Section 11 is about the number that *should* change.  This section is about the
+number that should not: `order=` is slated for removal, and a caller who passes
+`order='xy'` today needs some way to keep the answer they have.  There are
+about forty-one files on GitHub calling `hessian_matrix(..., 'xy')`, so the
+question is worth a precise answer rather than a migration note.
+
+There are two obvious shims and only one of them works.
+
+**Reversing the returned list** is what the name `order` suggests, and it is
+what section 6 already measured failing.  It is worth seeing exactly *where* it
+fails, because the headline number hides it.
+
+```{code-cell} ipython3
+names = ("Hxx", "Hxy", "Hyy")
+
+print("order='xy' against order='rc' reversed, per element")
+print(f"{'sigma':>8}{'element':>10}{'absolute':>12}{'of its own range':>19}")
+for sigma in (1, 3, (3, 4)):
+    got = hessian_matrix(IMG, sigma=sigma, mode=MODE, order="xy",
+                         use_gaussian_derivatives=True)
+    rev = hessian_matrix(IMG, sigma=sigma, mode=MODE, order="rc",
+                         use_gaussian_derivatives=True)[::-1]
+    for name, a, b in zip(names, got, rev):
+        gap = float(np.max(np.abs(a - b)))
+        print(f"{str(sigma):>8}{name:>10}{gap:>12.2e}"
+              f"{gap / float(np.max(np.abs(a))):>18.1%}")
+```
+
+Both diagonals come back **exactly**: reversing the list simply swaps `Hrr` and
+`Hcc`, and neither is affected. All the error lands on the mixed element, and
+it is not a rounding difference — it is half the element or more. Section 7
+says why: the mixed element is the only one built by differentiating along *two
+different* axes in sequence, so it is the only one whose answer depends on
+which axis went first.
+
+How large depends on the image. `IMG` above is uniform random, so it carries
+structure right up to the border where the defect lives. On the `coins`
+photograph the same measurement gives 20% to 38% — smaller, and still far too
+large for a shim.
+
+**Transposing the frame** works, and section 7 says why that too. Run the whole
+computation on the transposed image and transpose the results back. Every axis
+is then extended in the same frame it was extended in before, so the operation
+the old code performed is reproduced rather than approximated.
+
+```{code-cell} ipython3
+def as_xy(func, image, **kwargs):
+    """Reproduce `order='xy'` from an implementation that only does 'rc'."""
+    if "sigma" in kwargs and not np.isscalar(kwargs["sigma"]):
+        # A sequence sigma is per axis, so it reverses with the axes.
+        kwargs = dict(kwargs, sigma=tuple(kwargs["sigma"])[::-1])
+    transposed = func(np.transpose(image), order="rc", **kwargs)
+    return [np.transpose(h) for h in transposed]
+```
+
+It is exact, and it stays exact across the whole parameter space that matters —
+both functions, both `use_gaussian_derivatives` settings, every boundary mode,
+and an anisotropic `sigma`.
+
+```{code-cell} ipython3
+def shim_error(func, image, **kwargs):
+    """Worst relative disagreement between real 'xy' and the transposed shim."""
+    got = func(image, order="xy", **kwargs)
+    shimmed = as_xy(func, image, **kwargs)
+    scale = max(float(np.max(np.abs(a))) for a in got)
+    return max(float(np.max(np.abs(a - b))) for a, b in zip(got, shimmed)) / scale
+
+
+print(f"{'function':>18}{'setting':>26}{'relative error':>17}")
+for ugd in (True, False):
+    for mode in ("constant", "reflect", "nearest", "wrap", "mirror"):
+        err = shim_error(hessian_matrix, IMG, sigma=(3, 4), mode=mode,
+                         use_gaussian_derivatives=ugd)
+        print(f"{'hessian_matrix':>18}{f'ugd={ugd}, mode={mode}':>26}{err:>17.1e}")
+for mode in ("constant", "reflect", "nearest"):
+    err = shim_error(structure_tensor, IMG, sigma=(3, 4), mode=mode)
+    print(f"{'structure_tensor':>18}{f'mode={mode}':>26}{err:>17.1e}")
+```
+
+Floating-point noise throughout. Note the `sigma` reversal inside `as_xy`: a
+sequence `sigma` is one value per axis, so transposing the image without
+reversing it would silently apply the wrong width to each axis. That is the one
+part of the shim that is easy to leave out and hard to notice, because it only
+shows up for anisotropic smoothing.
+
+For `structure_tensor`, and for `hessian_matrix` with
+`use_gaussian_derivatives=False`, reversing the list is *also* exact — those
+paths have no per-call boundary extension to get wrong, so they are already
+transpose-equivariant. The transposed shim is the one that covers every case,
+so it is the one to document.
+
+**What this does not resolve.** The transposed shim reproduces what SK1 returns
+today, border artefact included. Fixes A and C in section 10 change that border
+deliberately, so a caller cannot have both the old numbers and the corrected
+ones. The shim is for callers who need bit-compatibility during a migration; it
+is not a recommendation to keep computing the old values.
