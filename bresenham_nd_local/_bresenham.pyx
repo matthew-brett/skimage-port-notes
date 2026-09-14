@@ -80,9 +80,8 @@ def _bresenham_nd(const cnp.intp_t[::1] start, const cnp.intp_t[::1] stop):
     can always subtract the start coordinate to make this so, and add it back
     when calculating the coordinates on the line).
 
-    Without loss of generality, declare all the deltas to be positive (we can
-    deal with negative deltas by suitable changes to the step sizes and
-    gradients below).
+    Without loss of generality, declare all the deltas to be positive; we can
+    deal with negative deltas by suitable changes to the step sizes.
 
     Step along the major axis in steps of 1.  Because this has the longest
     distance traveled, by definition, all the other axes will move at step
@@ -106,16 +105,37 @@ def _bresenham_nd(const cnp.intp_t[::1] start, const cnp.intp_t[::1] stop):
     is whether we should update pc[1] by 1, and whether should update pc[2] by
     1.
 
-    We decide that we'll update when n, the continuous value position, is at
-    the same or greater distance from pc[1] than it from pc[1] + 1.
+    Consider the second axis (first non-major axis). The continuous coordinate
+    is n.  The integer pixel coordinate we last used is pc[1].  The distance
+    (residual) along the second axis, from pc[1] to n is n - pc[1] = m g[1] -
+    pc[1].  Call coordinates < pc[1]: above pc[1].  Negative residuals mean
+    that n is above pc[1].  A residual of 0.5 or greater means that pc[1] + 1
+    is as close, or closer to n, than pc[1].
 
-    The distance between n and c[1] is m g[1] - pc[1].  Between n and c[1] + 1,
-    it is m g[1] - (pc[1] + 1).  The score is given by m g[1] - pc[1] - (m g[1]
-    - pc[1] + 1) => -pc[1] + pc[1] - 1.
+    We decide to update the pc[1] coordinate (to pc[1] + 1) when the residual m
+    g[1] - pc[1] >= 0.5.  We update when residual - 0.5 >= 0 -> m g[1] - pc[1]
+    - 0.5 >= 0.
 
-    One error accumulator per minor axis. The major axis (largest absolute
-    delta) advances on every step. Matches ``_line`` when ``start`` and
-    ``stop`` are length 2.
+    Notice by chosing to update when (residual - 0.5) >= 0, rather than > 0, we
+    are updating *early* - meaning we are chosing to update when the two
+    alternative coordinates are equidistant (here) from n.
+
+    We want to keep this score as an integer to save floating point
+    calculations, with their associated errors.  Remembering g[1] = delta[1] /
+    delta[0], we can multiply through by 2 * delta[0] to get what we call the
+    `switch_score` s: 2 m delta[1] - 2 delta[0] pc[1] - delta[0] >= 0.
+
+    We start (see above) at 0, 0, 0, with m==0.  pc[1] and pc[2] are 0. Now
+    take one step along the major axis so m==1.  The switch score s for the
+    second axis is 2 delta[1] - delta[0].  This will only trigger a switch to
+    pc[1] = 1 if delta[1] >= delta[0] / 2 or, equivalently g[1] >= 0.5.
+    Subsequently, at each step we unconditionally add 2 delta[1] (for the
+    increment of m), and subtract 2 delta[0] if we switch (add one to the
+    upcoming pc[1]), to accumulate the results of the switch cost formula
+    above.
+
+    In what follows, read `step_i + 1` as m, `previous - start` as pc,
+    `major_delta` as delta[0].
     """
     cdef Py_ssize_t ndim = start.shape[0]
     if stop.shape[0] != ndim:
@@ -128,13 +148,13 @@ def _bresenham_nd(const cnp.intp_t[::1] start, const cnp.intp_t[::1] stop):
         )
 
     cdef Py_ssize_t i, axis, major = 0
-    cdef Py_ssize_t n_steps = 0
+    cdef Py_ssize_t major_delta = 0
     cdef Py_ssize_t step_i
     cdef cnp.intp_t d
     cdef cnp.intp_t delta[cnp.NPY_MAXDIMS]
     cdef cnp.intp_t step[cnp.NPY_MAXDIMS]
     cdef cnp.intp_t switch_score[cnp.NPY_MAXDIMS]
-    cdef cnp.intp_t current[cnp.NPY_MAXDIMS]
+    cdef cnp.intp_t previous[cnp.NPY_MAXDIMS]
 
     for i in range(ndim):
         d = stop[i] - start[i]
@@ -147,34 +167,34 @@ def _bresenham_nd(const cnp.intp_t[::1] start, const cnp.intp_t[::1] stop):
         else:
             delta[i] = 0
             step[i] = 0
-        if delta[i] > n_steps:
-            n_steps = delta[i]
+        if delta[i] > major_delta:
+            major_delta = delta[i]
             major = i
 
     # Final coordinate adds one to steps that must be stored.
-    cdef cnp.intp_t[:, ::1] coords = np.empty((ndim, n_steps + 1),
+    cdef cnp.intp_t[:, ::1] coords = np.empty((ndim, major_delta + 1),
                                               dtype=np.intp)
 
     for i in range(ndim):
-        current[i] = start[i]
+        previous[i] = start[i]
         # Unused on major axis; kept so all axes share one update form.
-        switch_score[i] = 2 * delta[i] - n_steps
+        switch_score[i] = 2 * delta[i] - major_delta
 
     with nogil:
-        for step_i in range(n_steps):
+        for step_i in range(major_delta):
             for i in range(ndim):
-                coords[i, step_i] = current[i]
+                coords[i, step_i] = previous[i]
             for axis in range(ndim):
                 if axis == major:
                     continue
                 if switch_score[axis] >= 0:
-                    current[axis] += step[axis]
-                    switch_score[axis] -= 2 * n_steps
+                    previous[axis] += step[axis]
+                    switch_score[axis] -= 2 * major_delta
                 switch_score[axis] += 2 * delta[axis]
-            current[major] += step[major]
+            previous[major] += step[major]
 
         # Add end coordinate.
         for i in range(ndim):
-            coords[i, n_steps] = stop[i]
+            coords[i, major_delta] = stop[i]
 
     return np.asarray(coords)
