@@ -7,16 +7,17 @@ jupytext:
     format_version: 0.13
     jupytext_version: 1.19.1
 kernelspec:
-  name: xibabel
-  display_name: xibabel (Python 3.13)
+  name: python3
+  display_name: Python 3 (ipykernel)
   language: python
 ---
 
 # N-D Bresenham: Cython, and why other libraries disagree
 
-`_bresenham_nd` in the `bresenham-nd` worktree is the N-D form of
-scikit-image’s integer Bresenham. In 2-D it matches `_line` bit for bit. It
-does **not** always match ITK’s `BresenhamLine` or Rust’s `line_drawing::Bresenham3d`.
+`_bresenham_nd` (compiled locally from `bresenham_nd_local/_bresenham.pyx`) is
+the N-D form of scikit-image’s integer Bresenham. In 2-D it matches `_line`
+bit for bit. It does **not** always match ITK’s `BresenhamLine` or Rust’s
+`line_drawing::Bresenham3d`.
 
 This notebook settles *why*. The pixel counts agree (Chebyshev length); the
 paths diverge only on ties, and each library’s ties come from a different
@@ -27,6 +28,7 @@ Coordinates are in array order: the first index runs down / along axis 0.
 ```{code-cell} ipython3
 import itertools
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -37,8 +39,23 @@ from matplotlib.colors import ListedColormap
 ```
 
 ```{code-cell} ipython3
-# Subject under test (bresenham-nd build-install tree).
-from _skimage2.draw._draw import _line, _bresenham_nd
+# Subject under test: local Cython module (no worktree / _skimage2 needed).
+import pyximport
+
+_ROOT = Path.cwd()
+_PYX = _ROOT / "bresenham_nd_local" / "_bresenham.pyx"
+if not _PYX.is_file():
+    raise FileNotFoundError(
+        f"expected {_PYX}; run this notebook from the port-notes directory"
+    )
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+pyximport.install(
+    setup_args={"include_dirs": [np.get_include()]},
+    language_level=3,
+)
+from bresenham_nd_local._bresenham import _line, _bresenham_nd
 ```
 
 ```{code-cell} ipython3
@@ -820,5 +837,5 @@ binary”.
 | How to test anyway | §10: spec, ITK integer walker, Pillow, invariants, anti-Zingl |
 
 Fixtures for these corpora live under `bresenham_nd_fixtures/`. Measured with
-the `bresenham-nd` build, Rust `line_drawing` 1.0.1, ITK algorithm from
-`itkBresenhamLine.hxx` v5.4.0 (Python port).
+the local `bresenham_nd_local` Cython build, Rust `line_drawing` 1.0.1, ITK
+algorithm from `itkBresenhamLine.hxx` v5.4.0 (Python port).

@@ -23,6 +23,11 @@
 - In making code changes, consider the reviewer.  Prefer to minimize the code
   changes, where possible, and compatible with the rules above.  If the changes are substantial, suggest a plan to break up the code changes into stages that can be implemented as a series of pull-requests, each leaving the code-base in a testable state.
 
+## Python
+
+- Run Python with bare `python` / `python3` from this directory so pyenv
+  honours `.python-version`. Do not require or prefer `.venv/bin/python`.
+
 ## Output
 
 - Write output files, by default, into the `port-notes` directory.

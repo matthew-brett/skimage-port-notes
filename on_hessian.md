@@ -1407,10 +1407,53 @@ Everything the continuous operator had beyond Nyquist is folded back and added
 in. Folding is many-to-one. No choice of coefficients can separate what was
 added, because the samples no longer carry it. If the operator you want has
 energy above `pi` — and `-w**2 exp(-s**2 w**2 / 2)` always does — then no FIR on
-this grid is that operator. The black curve in the figure below is the
-*unperiodised* continuous `Ghat` on `[0, pi]`, drawn as a reference for what
-you would want if nothing folded. The achievable discrete ideal is the
-periodised sum above, not that curve.
+this grid is that operator.
+
+That last sentence needs one qualification, because it is easy to over-read.
+What sampling gives you is the periodised sum; what you *want* is the
+unperiodised `Ghat` restricted to `[-pi, pi]`, which is what the ideal operator
+does to the frequencies this grid can represent. Those are different, and the
+second one is not out of reach: you are not obliged to obtain a kernel by
+sampling. Taking the inverse transform of `Ghat` over the baseband gives a
+kernel whose transfer function is `Ghat` there, to whatever accuracy its support
+allows.
+
+```{code-cell} ipython3
+def transfer(x, k, omega):
+    """Transfer function of an even kernel, H(w) = sum k[n] cos(w n)."""
+    return np.array([np.sum(k * np.cos(w * x)) for w in omega])
+
+
+def baseband_taps(sigma, radius=16, n_omega=40001):
+    """Inverse-transform Ghat over [-pi, pi]: designed in frequency, not sampled."""
+    n = np.arange(-radius, radius + 1).astype(float)
+    w = np.linspace(-np.pi, np.pi, n_omega)
+    ghat = -(w**2) * np.exp(-(sigma**2) * w**2 / 2)
+    return n, np.array([np.trapezoid(ghat * np.cos(w * ni), w) / (2 * np.pi)
+                        for ni in n])
+
+
+probe = np.array([0.0, 0.8, 1.6, 2.4, np.pi])
+x_base, k_base = baseband_taps(0.5)
+x_samp, k_samp = gaussian_taps(0.5, 2, 8)
+
+print("sigma = 0.5: can a discrete kernel reach the unperiodised Ghat?")
+print(f"{'omega':>7}{'Ghat':>11}{'sampled':>11}{'designed in frequency':>24}")
+for w in probe:
+    want = -(w**2) * np.exp(-(0.5**2) * w**2 / 2)
+    print(f"{w:>7.2f}{want:>11.4f}"
+          f"{float(transfer(x_samp, k_samp, np.array([w]))[0]):>11.4f}"
+          f"{float(transfer(x_base, k_base, np.array([w]))[0]):>24.4f}")
+```
+
+So the black curve below is a reference the grid can in principle reach, not a
+mirage — which is what makes the gap to the sampled curve an error rather than
+an inevitability. Two things stop that construction being the recommended fix
+here. Its impulse response decays slowly, so a short support reintroduces a
+small DC leak of its own; and on the smooth test objects this notebook uses, the
+moment correction is already at or below its accuracy. It is the right answer to
+"is the target achievable" and not the right answer to "what should
+`hessian_matrix` do".
 
 **What the two conditions actually constrain is `H` at `w = 0`.** For an even
 kernel `H(w) = sum(k[n] cos(w n))`, so
@@ -1426,11 +1469,6 @@ The ideal operator has `Ghat(w) -> -w**2` as `w -> 0`: value zero, curvature
 DC, to second order". They say nothing about any other frequency.
 
 ```{code-cell} ipython3
-def transfer(x, k, omega):
-    """Transfer function of an even kernel, H(w) = sum k[n] cos(w n)."""
-    return np.array([np.sum(k * np.cos(w * x)) for w in omega])
-
-
 omega = np.linspace(0, np.pi, 400)
 
 fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.0))
@@ -1438,7 +1476,7 @@ for ax, sigma in zip(axes, (0.5, 1.5)):
     ideal = -(omega**2) * np.exp(-(sigma**2) * omega**2 / 2)
     x_raw, k_raw = gaussian_taps(sigma, 2, 8)
     x_fix, k_fix = corrected_taps(sigma, 2, 8)
-    ax.plot(omega, ideal, color=INK, lw=2.4, label="continuous Ghat (no fold)")
+    ax.plot(omega, ideal, color=INK, lw=2.4, label="Ghat, the reachable target")
     ax.plot(omega, transfer(x_raw, k_raw, omega), color=C_TWO, lw=1.8,
             label="sampled")
     ax.plot(omega, transfer(x_fix, k_fix, omega), color=C_ONE, lw=1.8, ls="--",
@@ -2057,6 +2095,123 @@ The border band changes by design, because it is currently wrong. The interior
 changes at `sigma <= 1` are corrections rather than regressions, but they are
 still changes users will see, so both belong in `skimage2` with a migration
 note, not in a patch release.
+
+### The cost nobody asked about: noise
+
+Everything above is measured on noiseless data, and one consequence of the
+change only shows up when that assumption is dropped. It is worth stating
+plainly, because it is the one honest argument against A + C, and because it is
+easy to reach for the wrong conclusion from it.
+
+**A more accurate second-derivative operator amplifies noise more.** Not as a
+regrettable side effect — as the same fact stated twice. Section 3 showed the
+shipped two-call scheme reporting 8% of a quadratic's curvature at
+`sigma = 0.5`. It reports about 8% of the noise as well. The corrected kernel
+reports the curvature in full, and the noise with it.
+
+```{code-cell} ipython3
+white = np.random.default_rng(1).normal(0, 1, (256, 256))
+inner_patch = (slice(30, -30),) * 2
+
+print("output standard deviation for unit white-noise input, Hrr")
+print(f"{'sigma':>7}{'np.gradient':>14}{'two calls':>12}{'Fix A + C':>12}")
+for sigma in (0.5, 0.7, 1.0, 2.0):
+    finite = hessian_matrix(white, sigma=sigma, mode=MODE,
+                            use_gaussian_derivatives=False)[0]
+    shipped = hessian_matrix(white, sigma=sigma, mode=MODE,
+                             use_gaussian_derivatives=True)[0]
+    fixed = fix_c(white, sigma)[0]
+    print(f"{sigma:>7}{finite[inner_patch].std():>14.4f}"
+          f"{shipped[inner_patch].std():>12.4f}{fixed[inner_patch].std():>12.4f}")
+```
+
+At `sigma = 0.5` the corrected operator passes forty times more noise than the
+shipped one. By `sigma = 2` the three agree, because by then all three are
+accurate and there is nothing left to differ about.
+
+The reason is in the transfer functions of the previous subsection. White noise
+has equal power at every frequency, so an operator's noise gain is set by its
+response near Nyquist — which is exactly where the shipped scheme falls short
+and the corrected one does not. An operator cannot be faithful at high frequency
+to signal and unfaithful to noise; they are the same frequencies.
+
+**Why this is not an argument for keeping the old scheme.** Two reasons.
+
+The suppression is indiscriminate. The two-call scheme does not attenuate noise
+and keep structure; it attenuates everything above a certain frequency, and real
+edges and thin ridges live there. A filter sweeping `sigma = 0.5` to find
+one-pixel features is reading them at 8% of their true strength, which is the
+defect of section 3, not a feature.
+
+And the caller already has the right control, which is `sigma` itself. Smoothing
+is what a scale-space method offers for exactly this purpose, it is documented,
+and it suppresses noise and structure in a way the caller can reason about. A
+blunt operator is an undocumented, scale-dependent, unremovable second smoothing
+on top.
+
+It follows that at small `sigma` the shipped scheme has the better
+signal-to-noise ratio, and the honest thing is to say so and then say what it
+costs.
+
+```{code-cell} ipython3
+quadratic = np.repeat((np.arange(400.0)[:, None] - 200) ** 2 / 2, 8, axis=1)
+NOISE_STD = 0.02
+
+
+def gain_and_snr(method, sigma):
+    """Measured curvature of a unit quadratic, and its ratio to the noise passed."""
+    gain = method(quadratic, sigma)[0][200, 4]
+    noise_out = method(white, sigma)[0][inner_patch].std() * NOISE_STD
+    return gain, gain / noise_out
+
+
+shipped_h = lambda im, s: hessian_matrix(im, sigma=s, mode=MODE,
+                                         use_gaussian_derivatives=True)
+
+print("unit quadratic plus white noise of std 0.02")
+print(f"{'sigma':>7}{'two calls':>22}{'Fix A + C':>22}")
+print(f"{'':>11}{'gain':>10}{'SNR':>12}{'gain':>10}{'SNR':>12}")
+for sigma in (0.5, 0.7, 0.8, 1.0, 2.0):
+    row = ""
+    for method in (shipped_h, fix_c):
+        gain, snr = gain_and_snr(method, sigma)
+        row += f"{gain:>10.3f}{snr:>12.1f}"
+    print(f"{sigma:>7}{row}")
+```
+
+At `sigma = 0.5` the shipped scheme reports a curvature of 0.080 at a
+signal-to-noise ratio of 88, and the corrected kernel reports 1.000 at a ratio
+of 27. Taken at face value that is a win for the old code, and it is worth
+understanding before dismissing it.
+
+What the two-call scheme is doing at `sigma = 0.5` is behaving like an operator
+at a coarser scale: attenuating high frequencies, which suppresses noise and
+signal together. The corrected operator can be asked for the same thing, by
+asking for the coarser scale — and then it says so.
+
+```{code-cell} ipython3
+shipped_gain, shipped_snr = gain_and_snr(shipped_h, 0.5)
+print(f"two calls at sigma = 0.5      : gain {shipped_gain:.3f}, SNR {shipped_snr:.0f}")
+for sigma in (0.7, 0.8, 0.9):
+    gain, snr = gain_and_snr(fix_c, sigma)
+    print(f"Fix A + C at sigma = {sigma}     : gain {gain:.3f}, SNR {snr:.0f}")
+```
+
+The corrected operator reaches the same noise performance at about
+`sigma = 0.8`, and reports the full curvature when it gets there. So the choice
+is not between a noisy answer and a quiet one. It is between a quiet answer at
+an undisclosed scale with the magnitude wrong by a factor of twelve, and the
+same quietness at a scale the caller named, with the magnitude right.
+
+**A warning about how this interacts with testing.** It is tempting to judge
+these methods end to end: degrade a high-resolution image, recover the Hessian
+from the degraded version, and score against the original. That test inverts the
+ranking. Scored against a noiseless reference, the operator that suppresses
+high frequencies scores best *because* it suppresses them, so the least accurate
+method wins and the most accurate looks worst by a wide margin. The two
+properties have to be measured apart — accuracy against a reference on clean
+data, noise gain separately, as above — because combined into one number they
+cancel, at a noise level the experimenter chose.
 
 `structure_tensor` needs none of it. It is correct as it stands, and its `order`
 parameter is a pure relabelling, so the whole of this applies to

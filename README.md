@@ -6,19 +6,17 @@ their content, as having specific copyright.
 
 * `coordinate_review.md` is my own (MBs) work; released under CC-By
 
-## Notebook kernel
+## Python environment
 
-This tree’s `.python-version` selects the `port-notes` pyenv env for the shell.
-Notebook UIs often ignore that and pick a generic `python3` kernel whose
-`argv` is bare `python` (whatever is on `PATH`).
+`.python-version` names the pyenv virtualenv (`port-notes`). In this directory,
+bare `python` / `python3` resolve to that env. Use that; do not require a
+`.venv` symlink.
 
-Once per machine:
+Notebook frontmatter asks for `kernelspec: name: python3` — “whatever
+`python3` kernel the executing Jupyter offers” — so the env follows the
+caller. `make check` and agent shells that load pyenv already do the right
+thing.
 
-```bash
-make kernel
-```
-
-That links `.venv` to the pyenv env and registers a user kernelspec named
-`port-notes`. Cursor / VS Code then default to `${workspaceFolder}/.venv`
-via `.vscode/settings.json`. In the kernel picker, choose
-**Python (port-notes)** if a notebook still offers a bare Python 3.
+Cursor’s workspace setting points at `~/.pyenv/shims/python` so the editor
+uses the same shim. An optional `.venv` link is only for tools that insist on
+a project-local `bin/python` and will not read pyenv.

@@ -14,5 +14,12 @@ _build/
 .scratch/
 .skimage-wheels/
 
-# Local link to the pyenv env (see `make kernel`)
+# Cython products from notebook-local modules
+*.so
+*.pyd
+bresenham_nd_local/*.c
+
+# Optional local link to the pyenv env (not required; see README)
 .venv
+
+.vscode/

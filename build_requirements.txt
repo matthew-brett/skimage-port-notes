@@ -10,3 +10,6 @@ pooch
 matplotlib
 opencv-python-headless
 pillow
+pandas
+tabulate
+cython
