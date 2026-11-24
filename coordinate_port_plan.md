@@ -966,19 +966,19 @@ on it rather than re-editing the same docstrings.
 
 Use this for every name in Group B and Group C.
 
-- [ ] `_skimage2` implementation flipped.
-- [ ] `_skimage2` docstring rewritten: parameters, returns, prose, and the
+- [ ] Flip the `_skimage2` implementation.
+- [ ] Rewrite the `_skimage2` docstring: parameters, returns, prose, and the
       doctest output values.
-- [ ] `tests/skimage2` updated, with the expected values changed by hand, not
+- [ ] Update `tests/skimage2`, with the expected values changed by hand, not
       by copying the new output.
-- [ ] `skimage` shim written with the SK1 signature and SK1 parameter names.
-- [ ] `skimage` shim has its own docstring with the SK1 values.
-- [ ] `@ski2_migration_decorator` message written, and it reads well both as a
+- [ ] Write the `skimage` shim with the SK1 signature and SK1 parameter names.
+- [ ] Give the `skimage` shim its own docstring with the SK1 values.
+- [ ] Write the `@ski2_migration_decorator` message so it reads well both as a
       warning and as a migration guide entry.
 - [ ] Mirror test added in `tests/skimage`.
-- [ ] `tests/skimage` otherwise unchanged.
-- [ ] `pytest --doctest-plus --pyargs _skimage2` passes.
-- [ ] `pytest --doctest-plus --pyargs skimage` passes.
+- [ ] Leave `tests/skimage` otherwise unchanged.
+- [ ] Confirm `pytest --doctest-plus --pyargs _skimage2` passes.
+- [ ] Confirm `pytest --doctest-plus --pyargs skimage` passes.
 - [ ] Any in-tree caller in `_skimage2` updated.
 
 
