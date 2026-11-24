@@ -1,5 +1,4 @@
 ---
-title: 'Coordinate port plan for SK2-API'
 jupytext:
   formats: ipynb,md:myst
   text_representation:
@@ -12,6 +11,8 @@ kernelspec:
   display_name: Python 3 (ipykernel)
   language: python
 ---
+
+# Coordinate port plan for SK2-API
 
 Companion to `coordinate_review.md` (what we want) and
 `skimage2_port_background.md` (how the port works).
