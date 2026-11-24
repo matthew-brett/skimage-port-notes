@@ -1,0 +1,26 @@
+((=- Unicode-capable LaTeX PDF template for nbconvert.
+
+Extends the stock latex article template. Sets text/math fonts that
+include Greek and common symbols (Latin Modern does not), and defines
+the pandoc ``none`` longtable counter when the stock template has not.
+-=))
+
+((*- extends 'latex/index.tex.j2' -*))
+
+((*- block packages -*))
+((( super() )))
+
+% Unicode in body/code: Latin Modern has no α, σ, λ, …
+\ifPDFTeX\else
+  \setmainfont{STIX Two Text}
+  \setsansfont{STIX Two Text}
+  \setmonofont{Menlo}[Scale=MatchLowercase]
+  \setmathfont{STIX Two Math}
+\fi
+
+% Pandoc captionless tables: \def\LTcaptype{none} (nbconvert#2254).
+% Stock nbconvert now defines this counter; older templates do not.
+\makeatletter
+\@ifundefined{c@none}{\newcounter{none}}{}
+\makeatother
+((*- endblock packages -*))

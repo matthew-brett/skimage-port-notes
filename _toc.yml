@@ -9,4 +9,6 @@ parts:
       - file: coordinate_review
       - file: coordinate_port_plan
       - file: hessian_refactor_plan
+      - file: frangi_refactor_plan
       - file: warp_refactor
+      - file: first_derivative_third_moment

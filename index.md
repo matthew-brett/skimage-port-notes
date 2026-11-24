@@ -9,7 +9,12 @@ API, with an emphasis on coordinate conventions.
 * {doc}`coordinate_port_plan` — staged plan to move `_skimage2` to array order.
 * {doc}`hessian_refactor_plan` — correctness fix for `hessian_matrix` at the
   image border, and removal of `order` from `structure_tensor`.
+* {doc}`frangi_refactor_plan` — six defects in `frangi`, which of them depend
+  on the `hessian_matrix` fix, and the order to repair them in.
 * {doc}`warp_refactor` — what `warp` should accept as `inverse_map`.
+* {doc}`first_derivative_third_moment` — a missing moment condition in
+  `_gaussian_derivative_kernel`, worth fixing independently of the Hessian
+  refactor.
 
 ```{note}
 Most of this material is AI-generated. See the repository `README.md` for what
